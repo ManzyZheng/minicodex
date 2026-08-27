@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .events import WebEvent
@@ -32,10 +34,12 @@ def create_app(web_session: WebSession) -> FastAPI:
         web_session.close()
 
     app = FastAPI(title="MiniCodex Web", docs_url=None, redoc_url=None, lifespan=lifespan)
+    static_dir = Path(__file__).with_name("static")
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-    @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        return "<h1>MiniCodex Web</h1>"
+    @app.get("/", response_class=FileResponse)
+    def index() -> Path:
+        return static_dir / "index.html"
 
     @app.get("/api/session")
     def session_snapshot() -> dict:
