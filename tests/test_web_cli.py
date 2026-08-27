@@ -1,4 +1,4 @@
-from minicodex.web_cli import build_parser, serve
+from minicodex.web_cli import build_parser, local_console_url, serve
 
 
 def test_web_cli_exposes_only_local_port_configuration() -> None:
@@ -19,3 +19,7 @@ def test_serve_always_binds_to_loopback(monkeypatch) -> None:
     serve(app, 8123)
 
     assert captured == {"app": app, "host": "127.0.0.1", "port": 8123, "log_level": "info"}
+
+
+def test_local_console_url_contains_the_session_token() -> None:
+    assert local_console_url(8123, "secret-token") == "http://127.0.0.1:8123/?token=secret-token"

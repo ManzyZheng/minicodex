@@ -55,7 +55,7 @@ class ApprovalGate:
         with self._condition:
             resolved = self._condition.wait_for(lambda: self._resolved or self._closed, timeout=self.wait_timeout)
             decision = self._decision if resolved and not self._closed else False
-            reason = "allowed" if decision else ("rejected" if resolved and not self._closed else "timeout")
+            reason = "closed" if self._closed else ("allowed" if decision else ("rejected" if resolved else "timeout"))
             self._pending = None
             self._resolved = False
             self._decision = False
@@ -64,7 +64,8 @@ class ApprovalGate:
             "approval_resolved",
             {"request_id": request.id, "allow": decision, "reason": reason},
         )
-        self.events.publish("status", {"value": "RUNNING"})
+        if reason != "closed":
+            self.events.publish("status", {"value": "RUNNING"})
         return decision
 
     def resolve(self, request_id: str, allow: bool) -> bool:

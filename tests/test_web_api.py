@@ -31,19 +31,24 @@ def make_client(tmp_path):
     runtime = ToolRuntime(tmp_path, command_approver=approvals.request)
     agent = AgentSession(model, runtime, on_event=events.publish)
     session = WebSession(agent, events, approvals, workspace=tmp_path, model_name="demo", max_turns_per_prompt=20)
-    return TestClient(create_app(session)), session, model
+    return TestClient(create_app(session, access_token="test-token"), base_url="http://127.0.0.1"), session, model
+
+
+def api(client: TestClient, path: str) -> str:
+    separator = "&" if "?" in path else "?"
+    return f"{path}{separator}token=test-token"
 
 
 def test_session_and_prompt_endpoints_report_state_and_busy(tmp_path) -> None:
     client, session, model = make_client(tmp_path)
-    snapshot = client.get("/api/session")
+    snapshot = client.get(api(client, "/api/session"))
     assert snapshot.status_code == 200
     assert snapshot.json()["max_turns_per_prompt"] == 20
 
-    accepted = client.post("/api/prompts", json={"text": "first"})
+    accepted = client.post(api(client, "/api/prompts"), json={"text": "first"})
     assert accepted.status_code == 202
     assert model.started.wait(0.5)
-    assert client.post("/api/prompts", json={"text": "second"}).status_code == 409
+    assert client.post(api(client, "/api/prompts"), json={"text": "second"}).status_code == 409
 
     model.release.set()
     assert session.wait_until_idle(1.0)
@@ -51,8 +56,21 @@ def test_session_and_prompt_endpoints_report_state_and_busy(tmp_path) -> None:
 
 def test_prompt_endpoint_rejects_blank_text(tmp_path) -> None:
     client, _session, _model = make_client(tmp_path)
-    response = client.post("/api/prompts", json={"text": "   "})
+    response = client.post(api(client, "/api/prompts"), json={"text": "   "})
     assert response.status_code == 422
+
+
+def test_api_requires_session_token_and_rejects_cross_site_origin(tmp_path) -> None:
+    client, _session, _model = make_client(tmp_path)
+    assert client.get("/api/session").status_code == 401
+    assert client.get("/api/session?token=wrong").status_code == 401
+    assert client.get(api(client, "/api/session"), headers={"Origin": "https://evil.example"}).status_code == 403
+
+
+def test_app_rejects_non_loopback_host(tmp_path) -> None:
+    client, _session, _model = make_client(tmp_path)
+    response = client.get(api(client, "/api/session"), headers={"Host": "attacker.example"})
+    assert response.status_code == 400
 
 
 def test_sse_formatter_uses_id_event_and_compact_json() -> None:

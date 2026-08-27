@@ -57,6 +57,7 @@ class WebSession:
             status = self._status
         if self.approvals.pending() is not None:
             status = "WAITING_APPROVAL"
+        pending = self.approvals.pending()
         return {
             "workspace": str(self.workspace),
             "model": self.model_name,
@@ -64,6 +65,17 @@ class WebSession:
             "verification_status": self._verification_status(),
             "max_turns_per_prompt": self.max_turns_per_prompt,
             "prompt_count": self.agent.prompt_count,
+            "pending_approval": (
+                {
+                    "request_id": pending.id,
+                    "argv": pending.argv,
+                    "purpose": pending.purpose,
+                    "timeout_sec": pending.timeout_sec,
+                    "approval_timeout_sec": self.approvals.wait_timeout,
+                }
+                if pending
+                else None
+            ),
         }
 
     def submit_prompt(self, text: str) -> None:
@@ -91,8 +103,8 @@ class WebSession:
             with self._condition:
                 self._status = "IDLE"
                 self._worker = None
+                self.events.publish("status", {"value": "IDLE"})
                 self._condition.notify_all()
-            self.events.publish("status", {"value": "IDLE"})
 
     def wait_until_idle(self, timeout: float) -> bool:
         with self._condition:

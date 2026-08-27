@@ -85,6 +85,30 @@ class AgentSession:
             return str(verification["status"])
         return "NOT_RUN"
 
+    def _cancel_unanswered_tool_calls(self, reason: str) -> None:
+        assistant_index = next(
+            (index for index in range(len(self.messages) - 1, -1, -1) if self.messages[index].get("tool_calls")),
+            None,
+        )
+        if assistant_index is None:
+            return
+        calls = self.messages[assistant_index].get("tool_calls") or []
+        answered = {
+            message.get("tool_call_id")
+            for message in self.messages[assistant_index + 1 :]
+            if message.get("role") == "tool"
+        }
+        for call in calls:
+            if call["id"] in answered:
+                continue
+            result = ToolResult.failure(
+                tool=call["function"]["name"],
+                call_id=call["id"],
+                code="TOOL_CALL_CANCELLED",
+                message=reason,
+            )
+            self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": serialize_tool_result(result)})
+
     def _outcome(self, reason: StopReason, text: str, turns: int) -> AgentOutcome:
         outcome = AgentOutcome(reason, text, turns, self._verification_status(), self.tools.last_verification)
         self._trace("final", {"stop_reason": reason.value, "text": text, "turns": turns, "verification_status": outcome.verification_status})
@@ -183,6 +207,7 @@ class AgentSession:
                     self.messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
                     self._trace("tool_result", result.to_dict())
                     if repeated >= 3:
+                        self._cancel_unanswered_tool_calls("Skipped because the current prompt stopped after repeated failed calls.")
                         return self._outcome(StopReason.REPEATED_CALL, "Stopped after three identical failed tool calls without progress.", turns)
             return self._outcome(
                 StopReason.MAX_TURNS,
@@ -190,8 +215,10 @@ class AgentSession:
                 turns,
             )
         except KeyboardInterrupt:
+            self._cancel_unanswered_tool_calls("Skipped because the prompt was interrupted.")
             return self._outcome(StopReason.INTERRUPTED, "Interrupted by user.", turns)
         except Exception as exc:
+            self._cancel_unanswered_tool_calls("Skipped because prompt processing stopped after an error.")
             self._trace("model_error", {"type": type(exc).__name__, "message": str(exc)})
             self._emit("error", {"code": type(exc).__name__, "message": str(exc)})
             return self._outcome(StopReason.MODEL_ERROR, f"Model error: {exc}", turns)

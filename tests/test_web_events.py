@@ -33,3 +33,14 @@ def test_event_bus_wait_wakes_when_event_is_published() -> None:
     assert not thread.is_alive()
     assert received[0].payload == {"value": "IDLE"}
 
+
+def test_event_bus_bounds_history_and_large_strings() -> None:
+    bus = EventBus(max_events=2, max_string_chars=12)
+    bus.publish("one", {"text": "a"})
+    bus.publish("two", {"text": "b" * 100})
+    third = bus.publish("three", {"text": "c"})
+
+    retained = bus.after(0)
+    assert [event.type for event in retained] == ["two", "three"]
+    assert third.id == 3
+    assert "truncated" in retained[0].payload["text"]

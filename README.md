@@ -264,13 +264,15 @@ Allow? [y/N]
 minicodex-web --workspace .\demo\buggy_expense_tracker --port 8000
 ```
 
-然后打开 `http://127.0.0.1:8000`。服务端固定绑定 loopback，不提供 `--host` 参数，因此不会直接暴露给局域网或公网。页面关闭不会清空服务端 Session；只要进程未退出，重新打开页面仍能继续使用同一个 Agent 和 Workspace。事件总线会保留本次进程内的事件，刷新或断线重连后可以重新渲染此前的执行卡片。
+启动后终端会打印形如 `http://127.0.0.1:8000/?token=...` 的随机会话 URL，请使用这一整条地址。服务端固定绑定 loopback，不提供 `--host` 参数，因此不会直接暴露给局域网或公网。页面关闭不会清空服务端 Session；只要进程未退出，重新打开页面仍能继续使用同一个 Agent 和 Workspace。事件总线保留最近 2,000 个事件，刷新或断线重连后可以重新渲染保留窗口内的执行卡片。
+
+本机服务仍按不可信 HTTP 接口防护：每次启动生成 256-bit 级随机令牌，所有 `/api/*` 与 SSE 请求都必须携带；服务同时拒绝非 loopback `Host`、跨站 `Origin`，并设置 CSP、`no-referrer` 和 `nosniff`。这能阻断普通恶意网页与 DNS rebinding 直接读取事件或替用户批准命令。令牌只应保留在本机终端和地址栏，不要复制到截图、日志或他人可访问的位置；拥有该 URL 的本机进程或浏览器扩展仍应视为拥有本次 Agent 会话权限。
 
 Web 模式依然使用原来的 `AgentSession` 和 `ToolRuntime`。一次只接受一个 Prompt，后台单 Worker 串行运行；结束后可以继续发送下一条 Prompt，历史消息、read-before-edit 已读集合、文件变化序号和验证状态都会保留。工具结果同时交给浏览器事件总线和 `print_tool_result()`，所以页面与启动服务的终端都能看到执行证据。
 
 ### SSE 如何工作
 
-浏览器先 `GET /api/session` 获取 Workspace、模型、状态和验证结果，再用原生 `EventSource` 长连接 `GET /api/events`。服务端把每个事件编码为：
+浏览器先携带启动 URL 中的 token 请求 `GET /api/session`，获取 Workspace、模型、状态和验证结果，再用原生 `EventSource` 长连接 `GET /api/events`。服务端把每个事件编码为：
 
 ```text
 id: 17
@@ -285,10 +287,10 @@ Web API 很小：
 | 路径 | 用途 |
 |---|---|
 | `GET /`、`GET /static/*` | 本机控制台与静态资源 |
-| `GET /api/session` | 当前会话快照 |
-| `GET /api/events` | SSE 事件流与断线补发 |
-| `POST /api/prompts` | 提交下一轮 Prompt；忙碌时返回 409 |
-| `POST /api/approvals/{id}` | 允许或拒绝当前命令 |
+| `GET /api/session?token=...` | 当前会话快照与待审批命令 |
+| `GET /api/events?token=...` | SSE 事件流与断线补发 |
+| `POST /api/prompts?token=...` | 提交下一轮 Prompt；忙碌时返回 409 |
+| `POST /api/approvals/{id}?token=...` | 允许或拒绝当前命令 |
 
 ### 具体运行限制
 
@@ -303,6 +305,7 @@ Web API 很小：
 | Web 审批等待 | 300 秒，超时拒绝 | 防止 Worker 永久阻塞 |
 | SSE heartbeat | 15 秒 | 保持连接并及时发现断线 |
 | 并发 Prompt | 1 | 避免同一 Workspace 并发修改 |
+| Web 事件保留 | 最近 2,000 个；事件中的单个字符串最多 16,000 字符 | 限制长会话内存与刷新重放成本 |
 
 四轮连续演示的可直接复制 Prompt 见 [MULTI_TURN_DEMO.md](demo/buggy_expense_tracker/MULTI_TURN_DEMO.md)。
 

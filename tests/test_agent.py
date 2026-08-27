@@ -184,3 +184,21 @@ def test_agent_session_emits_tool_diff_and_completion_events(tmp_path: Path) -> 
     diff_payload = next(payload for event_type, payload in events if event_type == "diff")
     assert diff_payload["path"] == "value.txt"
     assert "+new" in diff_payload["diff"]
+
+
+def test_agent_session_repairs_unanswered_tool_calls_before_next_prompt(tmp_path: Path) -> None:
+    repeated_calls = [ToolCall(str(index), "read_file", {"path": "missing.txt"}) for index in range(4)]
+    model = MockModel([ModelReply(tool_calls=repeated_calls), ModelReply(content="continued safely")])
+    session = AgentSession(
+        model,
+        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+    )
+
+    assert session.run_turn("trigger repeated failures").stop_reason is StopReason.REPEATED_CALL
+    assert session.run_turn("continue").stop_reason is StopReason.COMPLETED
+
+    second_request = model.messages_seen[-1]
+    answered = {message["tool_call_id"] for message in second_request if message.get("role") == "tool"}
+    assert answered == {"0", "1", "2", "3"}
+    cancelled = next(message for message in second_request if message.get("tool_call_id") == "3")
+    assert "TOOL_CALL_CANCELLED" in cancelled["content"]

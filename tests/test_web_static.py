@@ -21,7 +21,7 @@ class StubSession:
 
 
 def test_root_serves_the_web_console_and_assets() -> None:
-    client = TestClient(create_app(StubSession()))
+    client = TestClient(create_app(StubSession(), access_token="test-token"), base_url="http://127.0.0.1")
 
     page = client.get("/")
     stylesheet = client.get("/static/app.css")

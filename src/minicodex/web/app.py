@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -27,13 +28,32 @@ def format_sse_event(event: WebEvent) -> str:
     return f"id: {event.id}\nevent: {event.type}\ndata: {data}\n\n"
 
 
-def create_app(web_session: WebSession) -> FastAPI:
+def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         yield
         web_session.close()
 
     app = FastAPI(title="MiniCodex Web", docs_url=None, redoc_url=None, lifespan=lifespan)
+
+    @app.middleware("http")
+    async def protect_local_api(request: Request, call_next):
+        host = request.headers.get("host", "").split(":", 1)[0].lower()
+        if host not in {"127.0.0.1", "localhost"}:
+            return JSONResponse({"detail": "invalid Host header"}, status_code=400)
+        origin = request.headers.get("origin")
+        if origin and not (origin.startswith("http://127.0.0.1:") or origin.startswith("http://localhost:")):
+            return JSONResponse({"detail": "cross-site requests are not allowed"}, status_code=403)
+        if request.url.path.startswith("/api/"):
+            supplied = request.query_params.get("token", "")
+            if not hmac.compare_digest(supplied, access_token):
+                return JSONResponse({"detail": "invalid session token"}, status_code=401)
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
     static_dir = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -72,6 +92,7 @@ def create_app(web_session: WebSession) -> FastAPI:
             cursor = max(0, int(last_event_id or "0"))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Last-Event-ID must be an integer") from exc
+        cursor = min(cursor, web_session.events.latest_id())
 
         async def generate():
             nonlocal cursor

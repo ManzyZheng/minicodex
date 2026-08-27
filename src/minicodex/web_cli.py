@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import secrets
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
 def serve(app, port: int) -> None:
     """Serve locally; the host is deliberately not configurable."""
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+
+
+def local_console_url(port: int, access_token: str) -> str:
+    return f"http://127.0.0.1:{port}/?token={access_token}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,11 +81,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: unable to initialize MiniCodex Web: {exc}", file=sys.stderr)
         return 2
 
-    print(f"MiniCodex workspace: {workspace}")
-    print(f"Session trace: {trace_path}")
-    print(f"Web console: http://127.0.0.1:{args.port}")
+    access_token = secrets.token_urlsafe(32)
+    console_url = local_console_url(args.port, access_token)
+    print(f"MiniCodex workspace: {workspace}", flush=True)
+    print(f"Session trace: {trace_path}", flush=True)
+    print(f"Web console: {console_url}", flush=True)
     try:
-        serve(create_app(session), args.port)
+        serve(create_app(session, access_token=access_token), args.port)
     except KeyboardInterrupt:
         pass
     finally:

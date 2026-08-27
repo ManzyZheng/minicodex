@@ -7,11 +7,13 @@ const sendButton = $("#send-button");
 const statusNode = $("#session-status");
 const approvalDialog = $("#approval-dialog");
 let pendingApprovalId = null;
+const sessionToken = new URLSearchParams(window.location.search).get("token") || "";
+const withToken = (path) => `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(sessionToken)}`;
 
 function setStatus(value) {
   statusNode.textContent = value;
   statusNode.dataset.status = value;
-  const busy = value === "RUNNING" || value === "WAITING_APPROVAL";
+  const busy = value !== "IDLE";
   promptInput.disabled = busy;
   sendButton.disabled = busy;
 }
@@ -54,19 +56,19 @@ function addCard(kind, title, body, mode = "text") {
 }
 
 function commandOutput(data) {
-  const command = Array.isArray(data.argv) ? data.argv.join(" ") : String(data.argv || "");
-  const output = [`$ ${command}`, data.stdout || "", data.stderr ? `[stderr]\n${data.stderr}` : "", `exit code: ${data.exit_code}`].filter(Boolean).join("\n");
+  const argv = JSON.stringify(data.argv || [], null, 2);
+  const output = [`argv = ${argv}`, data.stdout || "", data.stderr ? `[stderr]\n${data.stderr}` : "", `exit code: ${data.exit_code}`].filter(Boolean).join("\n");
   addCard(data.exit_code === 0 ? "command_output" : "error", "COMMAND OUTPUT", output, "code");
 }
 
-function showApproval(data) {
+function showApproval(data, recordEvent = true) {
   pendingApprovalId = data.request_id;
   setStatus("WAITING_APPROVAL");
   $("#approval-purpose").textContent = data.purpose || "Agent 请求执行命令";
-  $("#approval-command").textContent = (data.argv || []).join(" ");
+  $("#approval-command").textContent = JSON.stringify(data.argv || [], null, 2);
   $("#approval-timeout").textContent = `命令上限 ${data.timeout_sec}s · 审批等待 ${data.approval_timeout_sec}s`;
   if (!approvalDialog.open) approvalDialog.showModal();
-  addCard("approval_required", "APPROVAL REQUIRED", (data.argv || []).join(" "), "code");
+  if (recordEvent) addCard("approval_required", "APPROVAL REQUIRED", JSON.stringify(data.argv || [], null, 2), "code");
 }
 
 const handlers = {
@@ -75,7 +77,10 @@ const handlers = {
   user_prompt(data) { addCard("user_prompt", `USER · PROMPT ${data.prompt_index || ""}`, data.text); },
   model_message(data) { addCard("model_message", `AGENT · TURN ${data.turn || "—"}`, data.content); },
   tool_call(data) { addCard("tool_call", `TOOL CALL · ${data.name}`, JSON.stringify(data.arguments || {}, null, 2), "code"); },
-  tool_result(data) { if (!data.ok) addCard("error", `TOOL FAILED · ${data.tool_name || "tool"}`, data.error || data, "code"); },
+  tool_result(data) {
+    const detail = data.ok ? data.summary : (data.error || data);
+    addCard(data.ok ? "tool_result" : "error", `${data.ok ? "TOOL OK" : "TOOL FAILED"} · ${data.tool || "tool"}`, detail, data.ok ? "text" : "code");
+  },
   diff(data) { addCard("diff", `DIFF · ${data.path || "file"}`, data.diff || "", "diff"); },
   command_output: commandOutput,
   verification(data) { $("#verification-status").textContent = data.status || "NOT_RUN"; addCard("verification", "VERIFICATION", data.status || "NOT_RUN"); },
@@ -86,34 +91,40 @@ const handlers = {
 };
 
 async function loadSnapshot() {
-  const response = await fetch("/api/session");
+  const response = await fetch(withToken("/api/session"));
   if (!response.ok) throw new Error(`session snapshot failed: ${response.status}`);
   const data = await response.json();
   $("#workspace-path").textContent = data.workspace;
   $("#model-name").textContent = data.model;
   $("#verification-status").textContent = data.verification_status;
   setStatus(data.status);
+  if (data.pending_approval) showApproval(data.pending_approval, false);
 }
 
 function connectEvents() {
-  const source = new EventSource("/api/events");
+  const source = new EventSource(withToken("/api/events"));
   Object.entries(handlers).forEach(([name, handler]) => source.addEventListener(name, (event) => handler(JSON.parse(event.data))));
-  source.onerror = () => { statusNode.textContent = "RECONNECTING"; statusNode.dataset.status = "RECONNECTING"; };
+  source.onerror = () => setStatus("RECONNECTING");
+  source.onopen = () => loadSnapshot().catch(reportError);
 }
 
 async function submitPrompt() {
   const text = promptInput.value.trim();
   if (!text) return;
   setStatus("RUNNING");
-  const response = await fetch("/api/prompts", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text})});
-  if (!response.ok) { setStatus("IDLE"); addCard("error", `REQUEST FAILED · ${response.status}`, await response.text(), "code"); return; }
+  const response = await fetch(withToken("/api/prompts"), {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text})});
+  if (!response.ok) { addCard("error", `REQUEST FAILED · ${response.status}`, await response.text(), "code"); await loadSnapshot(); return; }
   promptInput.value = "";
 }
 
 async function decideApproval(allow) {
   if (!pendingApprovalId) return;
-  const response = await fetch(`/api/approvals/${encodeURIComponent(pendingApprovalId)}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({allow})});
+  $("#allow-command").disabled = true;
+  $("#reject-command").disabled = true;
+  const response = await fetch(withToken(`/api/approvals/${encodeURIComponent(pendingApprovalId)}`), {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({allow})});
   if (!response.ok) addCard("error", "APPROVAL FAILED", await response.text(), "code");
+  $("#allow-command").disabled = false;
+  $("#reject-command").disabled = false;
 }
 
 function reportError(error) { setStatus("ERROR"); addCard("error", "CONNECTION ERROR", error.message || String(error), "code"); }
@@ -121,4 +132,5 @@ $("#prompt-form").addEventListener("submit", (event) => { event.preventDefault()
 promptInput.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitPrompt().catch(reportError); } });
 $("#allow-command").addEventListener("click", () => decideApproval(true).catch(reportError));
 $("#reject-command").addEventListener("click", () => decideApproval(false).catch(reportError));
+approvalDialog.addEventListener("cancel", (event) => { event.preventDefault(); decideApproval(false).catch(reportError); });
 loadSnapshot().then(connectEvents).catch(reportError);
