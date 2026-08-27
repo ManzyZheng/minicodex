@@ -43,3 +43,22 @@
 - 1:50–2:00：快速切到终端输出和 `.minicodex/sessions/*.jsonl`，说明网页、终端、Trace 是同一次执行的三个视角。
 
 录制前用 `git status --short demo/buggy_expense_tracker` 确认 fixture 没有被上一次演示修改；初始测试应为 `2 failed`。
+
+## 重置 Demo
+
+完成演示后，在 MiniCodex 仓库根目录执行下面一条命令，即可把 Demo 中所有已被 Git 跟踪的源码、测试、样例和说明恢复到当前提交的初始状态：
+
+```powershell
+git restore --source=HEAD --worktree -- demo/buggy_expense_tracker
+```
+
+该命令只重置 `demo/buggy_expense_tracker`，不会影响 MiniCodex 主程序或仓库中的其他项目，也不会删除被 Git 忽略的 `.minicodex/sessions/*.jsonl` 会话记录。它会丢弃 Demo 目录中尚未提交的已跟踪文件修改，因此应在录屏完成、确认不再需要当前修复结果后执行。
+
+重置后可以检查初始基线：
+
+```powershell
+cd demo\buggy_expense_tracker
+python -m pytest -q
+```
+
+正确的演示起点应再次显示 `2 failed`。
