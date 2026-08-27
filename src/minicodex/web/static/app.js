@@ -8,6 +8,7 @@ const statusNode = $("#session-status");
 const approvalDialog = $("#approval-dialog");
 let pendingApprovalId = null;
 let latestEventId = 0;
+let currentTurn = null;
 const MAX_TIMELINE_CARDS = 500;
 const sessionToken = new URLSearchParams(window.location.search).get("token") || "";
 const withToken = (path) => `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(sessionToken)}`;
@@ -20,9 +21,91 @@ function setStatus(value) {
   sendButton.disabled = busy;
 }
 
-function addCard(kind, title, body, mode = "text") {
+function removeEmptyState() {
   const empty = $("#empty-state");
   if (empty) empty.remove();
+}
+
+function trimTimeline() {
+  const items = timeline.querySelectorAll(".event-card, .event-line");
+  if (items.length > MAX_TIMELINE_CARDS) items[0].remove();
+}
+
+function updateProcessSummary() {
+  if (currentTurn) currentTurn.processSummary.textContent = `执行过程 · ${currentTurn.eventCount} 条记录`;
+}
+
+function appendItem(item, target, {countProcess = true} = {}) {
+  const destination = target || (currentTurn && !currentTurn.completed ? currentTurn.processItems : timeline);
+  destination.append(item);
+  if (countProcess && currentTurn && destination === currentTurn.processItems) {
+    currentTurn.eventCount += 1;
+    updateProcessSummary();
+  }
+  trimTimeline();
+  item.scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+function beginTurn(data) {
+  removeEmptyState();
+  if (currentTurn) currentTurn.root.open = false;
+
+  const root = document.createElement("details");
+  root.className = "turn-group";
+  root.open = true;
+  root.dataset.status = "running";
+
+  const summary = document.createElement("summary");
+  summary.className = "turn-summary";
+  const title = document.createElement("strong");
+  title.className = "turn-summary-title";
+  title.textContent = `PROMPT ${data.prompt_index || "—"} · RUNNING`;
+  const prompt = document.createElement("span");
+  prompt.className = "turn-summary-prompt";
+  prompt.textContent = data.text || "";
+  summary.append(title, prompt);
+
+  const body = document.createElement("div");
+  body.className = "turn-body";
+  const promptItems = document.createElement("div");
+  promptItems.className = "turn-prompt";
+
+  const process = document.createElement("details");
+  process.className = "turn-process";
+  process.open = true;
+  const processSummary = document.createElement("summary");
+  processSummary.className = "process-summary";
+  processSummary.textContent = "执行过程 · 0 条记录";
+  const processItems = document.createElement("div");
+  processItems.className = "turn-process-items";
+  process.append(processSummary, processItems);
+
+  const final = document.createElement("section");
+  final.className = "turn-final";
+  body.append(promptItems, process, final);
+  root.append(summary, body);
+  timeline.append(root);
+
+  currentTurn = {
+    root, title, promptItems, process, processSummary, processItems, final,
+    promptIndex: data.prompt_index || "—", eventCount: 0, completed: false,
+  };
+  addCard("user_prompt", `USER · PROMPT ${data.prompt_index || ""}`, data.text, "text", promptItems, false);
+}
+
+function completeTurn(data) {
+  if (!currentTurn) beginTurn({prompt_index: "—", text: "已恢复的会话输出"});
+  currentTurn.completed = true;
+  currentTurn.root.dataset.status = "completed";
+  currentTurn.root.open = true;
+  currentTurn.process.open = false;
+  currentTurn.title.textContent = `PROMPT ${currentTurn.promptIndex} · COMPLETED · FINAL TURN ${data.turns || "—"}`;
+  addCard("turn_completed", `AGENT · FINAL · TURN ${data.turns || "—"}`, data.text || "任务结束", "markdown", currentTurn.final, false);
+  currentTurn.root.scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+function addCard(kind, title, body, mode = "text", target = null, countProcess = true) {
+  removeEmptyState();
   const card = document.createElement("article");
   card.className = "event-card";
   card.dataset.kind = kind;
@@ -55,15 +138,11 @@ function addCard(kind, title, body, mode = "text") {
     else content.textContent = typeof body === "string" ? body : JSON.stringify(body, null, 2);
     card.append(content);
   }
-  timeline.append(card);
-  const cards = timeline.querySelectorAll(".event-card, .event-line");
-  if (cards.length > MAX_TIMELINE_CARDS) cards[0].remove();
-  card.scrollIntoView({behavior:"smooth", block:"nearest"});
+  appendItem(card, target, {countProcess});
 }
 
-function addCompactLine(kind, text) {
-  const empty = $("#empty-state");
-  if (empty) empty.remove();
+function addCompactLine(kind, text, target = null) {
+  removeEmptyState();
   const line = document.createElement("article");
   line.className = "event-line";
   line.dataset.kind = kind;
@@ -72,10 +151,7 @@ function addCompactLine(kind, text) {
   const stamp = document.createElement("time");
   stamp.textContent = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
   line.append(message, stamp);
-  timeline.append(line);
-  const items = timeline.querySelectorAll(".event-card, .event-line");
-  if (items.length > MAX_TIMELINE_CARDS) items[0].remove();
-  line.scrollIntoView({behavior:"smooth", block:"nearest"});
+  appendItem(line, target);
 }
 
 function commandOutput(data) {
@@ -96,7 +172,7 @@ function showApproval(data) {
 const handlers = {
   session_started(data) { $("#workspace-path").textContent = data.workspace || "—"; $("#model-name").textContent = data.model || "—"; },
   status(data) { setStatus(data.value); },
-  user_prompt(data) { addCard("user_prompt", `USER · PROMPT ${data.prompt_index || ""}`, data.text); },
+  user_prompt(data) { beginTurn(data); },
   model_message(data) { addCard("model_message", `AGENT · TURN ${data.turn || "—"}`, data.content, "summary"); },
   tool_result(data) {
     if (data.ok) {
@@ -110,7 +186,7 @@ const handlers = {
   verification(data) { $("#verification-status").textContent = data.status || "NOT_RUN"; },
   approval_required: showApproval,
   approval_resolved(_data) { if (approvalDialog.open) approvalDialog.close(); pendingApprovalId = null; setStatus("RUNNING"); },
-  turn_completed(data) { $("#verification-status").textContent = data.verification_status || "NOT_RUN"; addCard("turn_completed", `AGENT · FINAL · TURN ${data.turns || "—"}`, data.text || "任务结束", "markdown"); },
+  turn_completed(data) { $("#verification-status").textContent = data.verification_status || "NOT_RUN"; completeTurn(data); },
   error(data) { addCard("error", `ERROR · ${data.code || "UNKNOWN"}`, data.message || data, "code"); },
 };
 
@@ -173,4 +249,4 @@ promptInput.addEventListener("keydown", (event) => { if (event.key === "Enter" &
 $("#allow-command").addEventListener("click", () => decideApproval(true).catch(reportError));
 $("#reject-command").addEventListener("click", () => decideApproval(false).catch(reportError));
 approvalDialog.addEventListener("cancel", (event) => { event.preventDefault(); decideApproval(false).catch(reportError); });
-loadSnapshot().then((snapshot) => connectEvents(snapshot.event_id || 0)).catch(reportError);
+loadSnapshot().then(() => connectEvents(0)).catch(reportError);
