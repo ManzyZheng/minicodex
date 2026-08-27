@@ -148,7 +148,7 @@ class AgentSession:
                 self.messages = compact_messages(self.messages)
                 reply = self.model.complete(self.messages, TOOL_SCHEMAS)
                 self._trace("model_reply", {"turn": turns, "content": reply.content, "tool_calls": [c.__dict__ for c in reply.tool_calls]})
-                if reply.content:
+                if reply.content and reply.tool_calls:
                     self._emit("model_message", {"content": reply.content, "turn": turns})
                 self.messages.append(self._assistant_message(reply))
                 if not reply.tool_calls:

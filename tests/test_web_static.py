@@ -25,6 +25,7 @@ def test_root_serves_the_web_console_and_assets() -> None:
 
     page = client.get("/")
     stylesheet = client.get("/static/app.css")
+    markdown = client.get("/static/markdown.js")
     script = client.get("/static/app.js")
 
     assert page.status_code == 200
@@ -33,11 +34,14 @@ def test_root_serves_the_web_console_and_assets() -> None:
     assert 'id="approval-dialog"' in page.text
     assert stylesheet.status_code == 200
     assert "--color-ink" in stylesheet.text
+    assert markdown.status_code == 200
+    assert "renderMarkdown" in markdown.text
     assert script.status_code == 200
     assert "EventSource" in script.text
 
 
 def test_frontend_does_not_insert_untrusted_event_html() -> None:
-    script_path = Path(__file__).parents[1] / "src" / "minicodex" / "web" / "static" / "app.js"
-    source = script_path.read_text(encoding="utf-8")
-    assert ".innerHTML" not in source
+    static_dir = Path(__file__).parents[1] / "src" / "minicodex" / "web" / "static"
+    for script_name in ("app.js", "markdown.js"):
+        source = (static_dir / script_name).read_text(encoding="utf-8")
+        assert ".innerHTML" not in source

@@ -48,10 +48,11 @@ function addCard(kind, title, body, mode = "text") {
     });
     card.append(diff);
   } else {
-    const content = document.createElement(mode === "code" ? "pre" : "p");
-    content.className = mode === "code" ? "event-code" : "event-body";
+    const content = document.createElement(mode === "code" ? "pre" : mode === "markdown" || mode === "summary" ? "div" : "p");
+    content.className = mode === "code" ? "event-code" : mode === "markdown" || mode === "summary" ? "markdown-body" : "event-body";
     if (mode === "summary") content.classList.add("model-summary");
-    content.textContent = typeof body === "string" ? body : JSON.stringify(body, null, 2);
+    if (mode === "markdown" || mode === "summary") window.MiniCodexMarkdown.renderMarkdown(content, body);
+    else content.textContent = typeof body === "string" ? body : JSON.stringify(body, null, 2);
     card.append(content);
   }
   timeline.append(card);
@@ -83,14 +84,13 @@ function commandOutput(data) {
   addCard(data.exit_code === 0 ? "command_output" : "error", "COMMAND OUTPUT", output, "code");
 }
 
-function showApproval(data, recordEvent = true) {
+function showApproval(data) {
   pendingApprovalId = data.request_id;
   setStatus("WAITING_APPROVAL");
   $("#approval-purpose").textContent = data.purpose || "Agent 请求执行命令";
   $("#approval-command").textContent = JSON.stringify(data.argv || [], null, 2);
   $("#approval-timeout").textContent = `命令上限 ${data.timeout_sec}s · 审批等待 ${data.approval_timeout_sec}s`;
   if (!approvalDialog.open) approvalDialog.showModal();
-  if (recordEvent) addCompactLine("approval_required", `[permission] waiting: ${data.purpose || "command"}`);
 }
 
 const handlers = {
@@ -107,10 +107,10 @@ const handlers = {
   },
   diff(data) { addCard("diff", `DIFF · ${data.path || "file"}`, data.diff || "", "diff"); },
   command_output: commandOutput,
-  verification(data) { $("#verification-status").textContent = data.status || "NOT_RUN"; addCompactLine("verification", `[verify] ${data.status || "NOT_RUN"}`); },
+  verification(data) { $("#verification-status").textContent = data.status || "NOT_RUN"; },
   approval_required: showApproval,
-  approval_resolved(data) { if (approvalDialog.open) approvalDialog.close(); pendingApprovalId = null; setStatus("RUNNING"); addCompactLine("approval_resolved", `[permission] ${data.reason || "resolved"}`); },
-  turn_completed(data) { $("#verification-status").textContent = data.verification_status || "NOT_RUN"; addCard("turn_completed", `TURN COMPLETE · ${data.stop_reason}`, data.text || "任务结束"); },
+  approval_resolved(_data) { if (approvalDialog.open) approvalDialog.close(); pendingApprovalId = null; setStatus("RUNNING"); },
+  turn_completed(data) { $("#verification-status").textContent = data.verification_status || "NOT_RUN"; addCard("turn_completed", `AGENT · FINAL · TURN ${data.turns || "—"}`, data.text || "任务结束", "markdown"); },
   error(data) { addCard("error", `ERROR · ${data.code || "UNKNOWN"}`, data.message || data, "code"); },
 };
 
@@ -125,7 +125,7 @@ async function loadSnapshot() {
   $("#verification-status").textContent = data.verification_status;
   setStatus(data.status);
   if (data.pending_approval) {
-    showApproval(data.pending_approval, false);
+    showApproval(data.pending_approval);
   } else {
     pendingApprovalId = null;
     if (approvalDialog.open) approvalDialog.close();

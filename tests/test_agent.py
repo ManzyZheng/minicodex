@@ -202,3 +202,19 @@ def test_agent_session_repairs_unanswered_tool_calls_before_next_prompt(tmp_path
     assert answered == {"0", "1", "2", "3"}
     cancelled = next(message for message in second_request if message.get("tool_call_id") == "3")
     assert "TOOL_CALL_CANCELLED" in cancelled["content"]
+
+
+def test_final_reply_emits_once_and_keeps_final_turn_number(tmp_path: Path) -> None:
+    events: list[tuple[str, dict]] = []
+    session = AgentSession(
+        MockModel([ModelReply(content="## Finished\n\nAll tests passed.")]),
+        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+        on_event=lambda event_type, payload: events.append((event_type, payload)),
+    )
+
+    session.run_turn("finish")
+
+    assert [event_type for event_type, _payload in events].count("model_message") == 0
+    completed = next(payload for event_type, payload in events if event_type == "turn_completed")
+    assert completed["text"] == "## Finished\n\nAll tests passed."
+    assert completed["turns"] == 1
