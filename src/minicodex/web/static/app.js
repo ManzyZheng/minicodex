@@ -78,11 +78,11 @@ function beginTurn(data) {
   processSummary.textContent = "执行过程 · 0 条记录";
   const processItems = document.createElement("div");
   processItems.className = "turn-process-items";
-  process.append(processSummary, processItems);
+  process.append(processSummary, promptItems, processItems);
 
   const final = document.createElement("section");
   final.className = "turn-final";
-  body.append(promptItems, process, final);
+  body.append(process, final);
   root.append(summary, body);
   timeline.append(root);
 

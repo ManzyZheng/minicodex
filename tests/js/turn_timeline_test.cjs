@@ -106,6 +106,7 @@ setImmediate(() => {
   const latestProcess = groups[1].querySelector(".turn-process");
   const latestFinal = groups[1].querySelector(".turn-final");
   assert.equal(latestProcess.open, false, "completed execution details should be collapsed");
+  assert.match(latestProcess.textContent, /add export/, "the full prompt should collapse with execution details");
   assert.match(latestFinal.textContent, /Second result/);
   assert.match(groups[1].querySelector(".turn-summary").textContent, /PROMPT 2/);
   assert.match(groups[1].querySelector(".turn-summary").textContent, /TURN 3/);
