@@ -7,6 +7,8 @@ const sendButton = $("#send-button");
 const statusNode = $("#session-status");
 const approvalDialog = $("#approval-dialog");
 let pendingApprovalId = null;
+let latestEventId = 0;
+const MAX_TIMELINE_CARDS = 500;
 const sessionToken = new URLSearchParams(window.location.search).get("token") || "";
 const withToken = (path) => `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(sessionToken)}`;
 
@@ -52,6 +54,8 @@ function addCard(kind, title, body, mode = "text") {
     card.append(content);
   }
   timeline.append(card);
+  const cards = timeline.querySelectorAll(".event-card");
+  if (cards.length > MAX_TIMELINE_CARDS) cards[0].remove();
   card.scrollIntoView({behavior:"smooth", block:"nearest"});
 }
 
@@ -94,16 +98,32 @@ async function loadSnapshot() {
   const response = await fetch(withToken("/api/session"));
   if (!response.ok) throw new Error(`session snapshot failed: ${response.status}`);
   const data = await response.json();
+  if (Number(data.event_id || 0) < latestEventId) return data;
+  latestEventId = Math.max(latestEventId, Number(data.event_id || 0));
   $("#workspace-path").textContent = data.workspace;
   $("#model-name").textContent = data.model;
   $("#verification-status").textContent = data.verification_status;
   setStatus(data.status);
-  if (data.pending_approval) showApproval(data.pending_approval, false);
+  if (data.pending_approval) {
+    showApproval(data.pending_approval, false);
+  } else {
+    pendingApprovalId = null;
+    if (approvalDialog.open) approvalDialog.close();
+  }
+  return data;
 }
 
-function connectEvents() {
-  const source = new EventSource(withToken("/api/events"));
-  Object.entries(handlers).forEach(([name, handler]) => source.addEventListener(name, (event) => handler(JSON.parse(event.data))));
+function connectEvents(afterId) {
+  const source = new EventSource(withToken(`/api/events?after=${afterId}`));
+  Object.entries(handlers).forEach(([name, handler]) => source.addEventListener(name, (event) => {
+    latestEventId = Math.max(latestEventId, Number(event.lastEventId || 0));
+    const data = JSON.parse(event.data);
+    if (data._truncated) {
+      addCard("tool_result", `${name.toUpperCase()} · TRUNCATED`, data.preview || "Event exceeded the Web preview budget.", "code");
+      return;
+    }
+    handler(data);
+  }));
   source.onerror = () => setStatus("RECONNECTING");
   source.onopen = () => loadSnapshot().catch(reportError);
 }
@@ -133,4 +153,4 @@ promptInput.addEventListener("keydown", (event) => { if (event.key === "Enter" &
 $("#allow-command").addEventListener("click", () => decideApproval(true).catch(reportError));
 $("#reject-command").addEventListener("click", () => decideApproval(false).catch(reportError));
 approvalDialog.addEventListener("cancel", (event) => { event.preventDefault(); decideApproval(false).catch(reportError); });
-loadSnapshot().then(connectEvents).catch(reportError);
+loadSnapshot().then((snapshot) => connectEvents(snapshot.event_id || 0)).catch(reportError);

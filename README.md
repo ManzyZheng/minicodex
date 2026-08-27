@@ -305,7 +305,8 @@ Web API 很小：
 | Web 审批等待 | 300 秒，超时拒绝 | 防止 Worker 永久阻塞 |
 | SSE heartbeat | 15 秒 | 保持连接并及时发现断线 |
 | 并发 Prompt | 1 | 避免同一 Workspace 并发修改 |
-| Web 事件保留 | 最近 2,000 个；事件中的单个字符串最多 16,000 字符 | 限制长会话内存与刷新重放成本 |
+| Web 事件保留 | 最近 2,000 个；单条事件 JSON 最多约 32,000 字符 | 限制长会话内存与刷新重放成本 |
+| 浏览器时间线 | 最近 500 张事件卡片 | 防止长会话 DOM 持续增长 |
 
 四轮连续演示的可直接复制 Prompt 见 [MULTI_TURN_DEMO.md](demo/buggy_expense_tracker/MULTI_TURN_DEMO.md)。
 
@@ -354,3 +355,4 @@ python -m pytest -q
 - 不实现多 Agent、MCP、IDE UI、Plan Mode、技能系统或代码索引。
 - 历史压缩采用确定性摘要提示，不追求完整语义记忆；目标是清楚展示上下文治理机制。
 - 文件并发修改检测尚未加入，后续可用 SHA-256/mtime 版本令牌升级。
+- 服务关闭会拒绝新 Prompt、取消待审批命令并最多等待当前 Worker 2 秒；第三方模型 SDK 的同步请求和已启动子进程当前无法强制协作取消，超时后状态会明确保留为 `CLOSING`。正式版可进一步加入模型取消令牌和 Windows Job Object 终止子进程树。

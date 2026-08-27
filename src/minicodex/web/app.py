@@ -86,24 +86,32 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
     @app.get("/api/events")
     async def event_stream(
         request: Request,
+        after: int = 0,
         last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     ) -> StreamingResponse:
         try:
-            cursor = max(0, int(last_event_id or "0"))
+            cursor = max(0, int(last_event_id)) if last_event_id is not None else max(0, after)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Last-Event-ID must be an integer") from exc
         cursor = min(cursor, web_session.events.latest_id())
+        subscription = web_session.events.subscribe(cursor)
 
         async def generate():
             nonlocal cursor
-            while not await request.is_disconnected():
-                events = await asyncio.to_thread(web_session.events.wait_after, cursor, 15.0)
-                if not events:
-                    yield "event: heartbeat\ndata: {}\n\n"
-                    continue
-                for event in events:
+            try:
+                for event in subscription.replay:
                     cursor = event.id
                     yield format_sse_event(event)
+                while not await request.is_disconnected():
+                    try:
+                        event = await asyncio.wait_for(subscription.queue.get(), timeout=15.0)
+                    except TimeoutError:
+                        yield "event: heartbeat\ndata: {}\n\n"
+                        continue
+                    cursor = event.id
+                    yield format_sse_event(event)
+            finally:
+                subscription.close()
 
         return StreamingResponse(
             generate(),

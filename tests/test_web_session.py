@@ -66,3 +66,17 @@ def test_web_session_rejects_second_prompt_while_running(tmp_path) -> None:
 
     model.release.set()
     assert web.wait_until_idle(timeout=1.0)
+
+
+def test_close_reports_closing_until_worker_finishes(tmp_path) -> None:
+    model = BlockingModel()
+    web = make_web_session(tmp_path, model)
+    web.submit_prompt("work")
+    assert model.started.wait(0.5)
+
+    web.close(wait_timeout=0)
+    assert web.snapshot()["status"] == "CLOSING"
+
+    model.release.set()
+    assert web.wait_until_idle(timeout=1.0)
+    assert web.snapshot()["status"] == "CLOSED"

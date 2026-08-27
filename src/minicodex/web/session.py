@@ -53,11 +53,16 @@ class WebSession:
         return "NOT_RUN"
 
     def snapshot(self) -> dict[str, Any]:
-        with self._condition:
-            status = self._status
-        if self.approvals.pending() is not None:
+        for _attempt in range(3):
+            before = self.events.latest_id()
+            pending = self.approvals.pending()
+            with self._condition:
+                status = self._status
+            event_id = self.events.latest_id()
+            if before == event_id:
+                break
+        if pending is not None:
             status = "WAITING_APPROVAL"
-        pending = self.approvals.pending()
         return {
             "workspace": str(self.workspace),
             "model": self.model_name,
@@ -65,6 +70,7 @@ class WebSession:
             "verification_status": self._verification_status(),
             "max_turns_per_prompt": self.max_turns_per_prompt,
             "prompt_count": self.agent.prompt_count,
+            "event_id": event_id,
             "pending_approval": (
                 {
                     "request_id": pending.id,
@@ -101,19 +107,26 @@ class WebSession:
             self.events.publish("error", {"code": type(exc).__name__, "message": str(exc)})
         finally:
             with self._condition:
-                self._status = "IDLE"
+                self._status = "CLOSED" if self._closed else "IDLE"
                 self._worker = None
-                self.events.publish("status", {"value": "IDLE"})
+                self.events.publish("status", {"value": self._status})
                 self._condition.notify_all()
 
     def wait_until_idle(self, timeout: float) -> bool:
         with self._condition:
-            return self._condition.wait_for(lambda: self._status == "IDLE", timeout=timeout)
+            return self._condition.wait_for(lambda: self._status in {"IDLE", "CLOSED"}, timeout=timeout)
 
     def resolve_approval(self, request_id: str, allow: bool) -> bool:
         return self.approvals.resolve(request_id, allow)
 
-    def close(self) -> None:
+    def close(self, *, wait_timeout: float = 2.0) -> None:
         with self._condition:
             self._closed = True
+            worker = self._worker
         self.approvals.close()
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=max(0.0, wait_timeout))
+        with self._condition:
+            self._status = "CLOSING" if worker is not None and worker.is_alive() else "CLOSED"
+            self.events.publish("status", {"value": self._status})
+            self._condition.notify_all()
