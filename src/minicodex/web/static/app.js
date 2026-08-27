@@ -50,13 +50,31 @@ function addCard(kind, title, body, mode = "text") {
   } else {
     const content = document.createElement(mode === "code" ? "pre" : "p");
     content.className = mode === "code" ? "event-code" : "event-body";
+    if (mode === "summary") content.classList.add("model-summary");
     content.textContent = typeof body === "string" ? body : JSON.stringify(body, null, 2);
     card.append(content);
   }
   timeline.append(card);
-  const cards = timeline.querySelectorAll(".event-card");
+  const cards = timeline.querySelectorAll(".event-card, .event-line");
   if (cards.length > MAX_TIMELINE_CARDS) cards[0].remove();
   card.scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+function addCompactLine(kind, text) {
+  const empty = $("#empty-state");
+  if (empty) empty.remove();
+  const line = document.createElement("article");
+  line.className = "event-line";
+  line.dataset.kind = kind;
+  const message = document.createElement("code");
+  message.textContent = text;
+  const stamp = document.createElement("time");
+  stamp.textContent = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+  line.append(message, stamp);
+  timeline.append(line);
+  const items = timeline.querySelectorAll(".event-card, .event-line");
+  if (items.length > MAX_TIMELINE_CARDS) items[0].remove();
+  line.scrollIntoView({behavior:"smooth", block:"nearest"});
 }
 
 function commandOutput(data) {
@@ -72,24 +90,26 @@ function showApproval(data, recordEvent = true) {
   $("#approval-command").textContent = JSON.stringify(data.argv || [], null, 2);
   $("#approval-timeout").textContent = `命令上限 ${data.timeout_sec}s · 审批等待 ${data.approval_timeout_sec}s`;
   if (!approvalDialog.open) approvalDialog.showModal();
-  if (recordEvent) addCard("approval_required", "APPROVAL REQUIRED", JSON.stringify(data.argv || [], null, 2), "code");
+  if (recordEvent) addCompactLine("approval_required", `[permission] waiting: ${data.purpose || "command"}`);
 }
 
 const handlers = {
   session_started(data) { $("#workspace-path").textContent = data.workspace || "—"; $("#model-name").textContent = data.model || "—"; },
   status(data) { setStatus(data.value); },
   user_prompt(data) { addCard("user_prompt", `USER · PROMPT ${data.prompt_index || ""}`, data.text); },
-  model_message(data) { addCard("model_message", `AGENT · TURN ${data.turn || "—"}`, data.content); },
-  tool_call(data) { addCard("tool_call", `TOOL CALL · ${data.name}`, JSON.stringify(data.arguments || {}, null, 2), "code"); },
+  model_message(data) { addCard("model_message", `AGENT · TURN ${data.turn || "—"}`, data.content, "summary"); },
   tool_result(data) {
-    const detail = data.ok ? data.summary : (data.error || data);
-    addCard(data.ok ? "tool_result" : "error", `${data.ok ? "TOOL OK" : "TOOL FAILED"} · ${data.tool || "tool"}`, detail, data.ok ? "text" : "code");
+    if (data.ok) {
+      addCompactLine("tool_result", `[tool:ok] ${data.tool || "tool"}: ${data.summary || "completed"}`);
+      return;
+    }
+    addCard("error", `TOOL FAILED · ${data.tool || "tool"}`, data.error || data, "code");
   },
   diff(data) { addCard("diff", `DIFF · ${data.path || "file"}`, data.diff || "", "diff"); },
   command_output: commandOutput,
-  verification(data) { $("#verification-status").textContent = data.status || "NOT_RUN"; addCard("verification", "VERIFICATION", data.status || "NOT_RUN"); },
+  verification(data) { $("#verification-status").textContent = data.status || "NOT_RUN"; addCompactLine("verification", `[verify] ${data.status || "NOT_RUN"}`); },
   approval_required: showApproval,
-  approval_resolved(data) { if (approvalDialog.open) approvalDialog.close(); pendingApprovalId = null; setStatus("RUNNING"); addCard("approval_resolved", "APPROVAL RESOLVED", data.reason || "resolved"); },
+  approval_resolved(data) { if (approvalDialog.open) approvalDialog.close(); pendingApprovalId = null; setStatus("RUNNING"); addCompactLine("approval_resolved", `[permission] ${data.reason || "resolved"}`); },
   turn_completed(data) { $("#verification-status").textContent = data.verification_status || "NOT_RUN"; addCard("turn_completed", `TURN COMPLETE · ${data.stop_reason}`, data.text || "任务结束"); },
   error(data) { addCard("error", `ERROR · ${data.code || "UNKNOWN"}`, data.message || data, "code"); },
 };
