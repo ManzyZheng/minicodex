@@ -7,6 +7,8 @@
 ## 功能
 
 - 单 Agent 的 `model → tool calls → tool results → model` 循环。
+- 同一浏览器页面中的连续多轮会话：复用消息历史、已读文件集合、工作区修改状态和验证状态。
+- 本机 Web Console：通过 SSE 实时展示模型回复、工具调用、命令输出、彩色 Diff 与命令审批；终端同步保留工具输出。
 - OpenAI-compatible Chat Completions Tool Calling；支持自定义 `base_url`。
 - 六个工具：`list_files`、`search_text`、`read_file`、`write_file`、`edit_file`、`run_command`。
 - Workspace Boundary：所有路径 resolve 后必须仍位于指定项目目录，阻止 `..`、绝对路径和符号链接逃逸。
@@ -26,7 +28,7 @@
 ## 架构
 
 ```text
-CLI / 用户任务
+CLI 或本机 Web 页面
       │
       ▼
 Agent Loop ──────── JSONL Session Trace
@@ -40,6 +42,9 @@ ToolRuntime ── WorkspaceGuard
   ├── list / search / read
   ├── write / exact edit / diff
   └── argv command ── y/N approval ── verification state
+
+WebSession ── EventBus ── SSE ── Browser Timeline
+     └────── ApprovalGate ◀── HTTP approval response
 ```
 
 主要模块：
@@ -50,6 +55,10 @@ ToolRuntime ── WorkspaceGuard
 - `model_adapter.py`：OpenAI-compatible 请求、tool call 解析及瞬时错误重试。
 - `context.py`：工具输出截断和历史压缩。
 - `session.py`：可逐行读取、可回放的 JSONL Trace。
+- `web/session.py`：一个 Worker 串行执行多个 Prompt，保证同一时间只有一轮任务在修改工作区。
+- `web/events.py`：带递增 ID 的内存事件总线，支持 SSE 断线后通过 `Last-Event-ID` 补发事件。
+- `web/approval.py`：把阻塞式命令确认桥接为浏览器审批，超时默认拒绝。
+- `web/app.py` 与 `web/static/`：FastAPI API、SSE 流和无框架前端。
 
 ## 项目目录与文件职责
 
@@ -64,6 +73,7 @@ minicodex/
 │   ├── __init__.py               # 包版本
 │   ├── __main__.py               # python -m minicodex 入口
 │   ├── cli.py                    # 参数解析、权限确认、终端输出和退出码
+│   ├── web_cli.py                # 仅绑定 127.0.0.1 的 Web 服务入口
 │   ├── config.py                 # 环境变量/.env 读取与配置校验
 │   ├── models.py                 # ToolCall、ModelReply、ToolResult 等数据模型
 │   ├── model_adapter.py          # OpenAI-compatible 模型适配与重试
@@ -72,6 +82,12 @@ minicodex/
 │   ├── workspace.py              # Workspace Boundary 与路径规范化
 │   ├── context.py                # 工具输出截断和历史摘要
 │   └── session.py                # JSONL Session Trace
+│   └── web/
+│       ├── app.py                # Prompt/审批 API、SSE 与静态文件路由
+│       ├── session.py            # 连续会话与单 Worker 编排
+│       ├── events.py             # 可重放内存事件总线
+│       ├── approval.py           # 浏览器命令审批门
+│       └── static/               # 原生 HTML/CSS/JS 执行时间线
 ├── tests/
 │   ├── test_core.py              # 配置、ToolResult、工作区和 Trace 测试
 │   ├── test_tools.py             # 六工具、安全边界与命令隔离测试
@@ -80,6 +96,7 @@ minicodex/
 │   └── test_cli.py               # CLI 参数与 Ctrl+C 行为测试
 ├── demo/buggy_expense_tracker/
 │   ├── TASK.md                   # 推荐直接交给 Agent 的演示任务
+│   ├── MULTI_TURN_DEMO.md        # 修 Bug→加功能→改旧功能→回归的四轮脚本
 │   ├── expense_tracker.py        # 带两个预置 Bug 的小型项目
 │   ├── sample.csv                # CLI 冒烟输入
 │   └── tests/test_expense_tracker.py
@@ -218,6 +235,8 @@ MINICODEX_ENABLE_THINKING=true
 
 ## 使用
 
+### 终端单轮模式
+
 ```powershell
 minicodex "检查测试失败，定位并修复 Bug，然后重新运行测试" --workspace .\demo\buggy_expense_tracker
 ```
@@ -238,6 +257,54 @@ Allow? [y/N]
 ```
 
 直接回车或输入 `n` 都会拒绝执行，拒绝结果同样会回灌给模型。获批的项目命令也不会继承 `MINICODEX_API_KEY` 等宿主 API Key，避免测试或构建脚本读取凭据。会话记录保存在目标工作区的 `.minicodex/sessions/*.jsonl`，路径同样经过 Workspace Boundary 校验；该目录默认被 Git 忽略。
+
+### 本机连续会话模式
+
+```powershell
+minicodex-web --workspace .\demo\buggy_expense_tracker --port 8000
+```
+
+然后打开 `http://127.0.0.1:8000`。服务端固定绑定 loopback，不提供 `--host` 参数，因此不会直接暴露给局域网或公网。页面关闭不会清空服务端 Session；只要进程未退出，重新打开页面仍能继续使用同一个 Agent 和 Workspace。事件总线会保留本次进程内的事件，刷新或断线重连后可以重新渲染此前的执行卡片。
+
+Web 模式依然使用原来的 `AgentSession` 和 `ToolRuntime`。一次只接受一个 Prompt，后台单 Worker 串行运行；结束后可以继续发送下一条 Prompt，历史消息、read-before-edit 已读集合、文件变化序号和验证状态都会保留。工具结果同时交给浏览器事件总线和 `print_tool_result()`，所以页面与启动服务的终端都能看到执行证据。
+
+### SSE 如何工作
+
+浏览器先 `GET /api/session` 获取 Workspace、模型、状态和验证结果，再用原生 `EventSource` 长连接 `GET /api/events`。服务端把每个事件编码为：
+
+```text
+id: 17
+event: diff
+data: {"path":"expense_tracker.py","diff":"..."}
+```
+
+SSE 是服务器到浏览器的单向流，适合持续推送 Agent 事件；用户 Prompt 和审批决定则用普通 HTTP POST 反向发送。每个事件有递增 ID，浏览器断线重连时会发送 `Last-Event-ID`，服务端从内存事件总线补发之后的事件。15 秒没有新事件时发送 heartbeat，避免空闲连接被中间层回收。相比 WebSocket，这里无需双向帧协议、连接状态机或额外前端库，代码量更小，也足够支持本项目的实时输出。
+
+Web API 很小：
+
+| 路径 | 用途 |
+|---|---|
+| `GET /`、`GET /static/*` | 本机控制台与静态资源 |
+| `GET /api/session` | 当前会话快照 |
+| `GET /api/events` | SSE 事件流与断线补发 |
+| `POST /api/prompts` | 提交下一轮 Prompt；忙碌时返回 409 |
+| `POST /api/approvals/{id}` | 允许或拒绝当前命令 |
+
+### 具体运行限制
+
+| 限制 | 当前值 | 目的 |
+|---|---:|---|
+| 每个 Prompt 最大模型轮数 | 20（可用 `--max-turns` 调整） | 防止无限 Agent 循环 |
+| 连续相同失败 Tool Call | 3 次 | 检测无进展重复调用 |
+| Prompt 长度 | 20,000 字符 | 控制请求规模 |
+| 单个 ToolResult 进入上下文 | 16,000 字符，保留约 70% 头部与 30% 尾部 | 保留错误起因和结尾摘要 |
+| 历史压缩阈值 | 约 80,000 字符 | 压缩旧的完整消息组，不拆 tool call/result |
+| 命令超时 | 默认 30 秒，允许 1–120 秒 | 限制子进程运行时间 |
+| Web 审批等待 | 300 秒，超时拒绝 | 防止 Worker 永久阻塞 |
+| SSE heartbeat | 15 秒 | 保持连接并及时发现断线 |
+| 并发 Prompt | 1 | 避免同一 Workspace 并发修改 |
+
+四轮连续演示的可直接复制 Prompt 见 [MULTI_TURN_DEMO.md](demo/buggy_expense_tracker/MULTI_TURN_DEMO.md)。
 
 ## 测试
 
