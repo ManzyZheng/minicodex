@@ -55,6 +55,8 @@ class WebSession:
     def snapshot(self) -> dict[str, Any]:
         with self._condition:
             status = self._status
+        if self.approvals.pending() is not None:
+            status = "WAITING_APPROVAL"
         return {
             "workspace": str(self.workspace),
             "model": self.model_name,

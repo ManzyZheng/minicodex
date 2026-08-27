@@ -31,3 +31,16 @@ def test_approval_gate_rejects_on_timeout_and_stale_id() -> None:
     assert gate.request(["python", "-V"], "other", 30) is False
     resolved = [event for event in bus.after(0) if event.type == "approval_resolved"]
     assert resolved[-1].payload["reason"] == "timeout"
+
+
+def test_approval_gate_reports_waiting_and_running_status() -> None:
+    bus = EventBus()
+    gate = ApprovalGate(bus, wait_timeout=0.5)
+    thread = threading.Thread(target=lambda: gate.request(["pytest"], "test", 120))
+    thread.start()
+    event = bus.wait_after(0, timeout=0.2)[0]
+    assert gate.resolve(event.payload["request_id"], True)
+    thread.join(0.5)
+
+    statuses = [item.payload["value"] for item in bus.after(0) if item.type == "status"]
+    assert statuses == ["WAITING_APPROVAL", "RUNNING"]

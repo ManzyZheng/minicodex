@@ -50,6 +50,7 @@ class ApprovalGate:
                 "approval_timeout_sec": self.wait_timeout,
             },
         )
+        self.events.publish("status", {"value": "WAITING_APPROVAL"})
 
         with self._condition:
             resolved = self._condition.wait_for(lambda: self._resolved or self._closed, timeout=self.wait_timeout)
@@ -63,6 +64,7 @@ class ApprovalGate:
             "approval_resolved",
             {"request_id": request.id, "allow": decision, "reason": reason},
         )
+        self.events.publish("status", {"value": "RUNNING"})
         return decision
 
     def resolve(self, request_id: str, allow: bool) -> bool:
