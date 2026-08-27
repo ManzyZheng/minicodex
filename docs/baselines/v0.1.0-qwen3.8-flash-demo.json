@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "baseline_id": "v0.1.0-qwen3.8-flash-expense-demo",
+  "recorded_at": "2026-08-27T09:06:58.732711Z",
+  "minicodex_version": "0.1.0",
+  "base_commit": "c694d6dcf5e86f59a3a9f5712fa38127a4b11628",
+  "model": "qwen3.8-flash",
+  "provider": "Alibaba Cloud Bailian OpenAI-compatible endpoint",
+  "task": "检查测试失败，定位并修复 Bug，然后重新运行测试",
+  "workspace_fixture": "demo/buggy_expense_tracker",
+  "outcome": {
+    "stop_reason": "COMPLETED",
+    "verification_status": "VERIFIED",
+    "model_turns": 8,
+    "duration_seconds": 59.4,
+    "edit_calls": 1
+  },
+  "tool_calls": {
+    "total": 10,
+    "list_files": 1,
+    "search_text": 0,
+    "read_file": 5,
+    "write_file": 0,
+    "edit_file": 1,
+    "run_command": 3
+  },
+  "verification": {
+    "before": {
+      "command": ["python", "-m", "pytest", "-q"],
+      "exit_code": 1,
+      "passed": 0,
+      "failed": 2,
+      "duration_seconds": 0.19
+    },
+    "after": {
+      "command": ["python", "-m", "pytest", "-q"],
+      "exit_code": 0,
+      "passed": 2,
+      "failed": 0,
+      "duration_seconds": 0.02
+    },
+    "cli_smoke": {
+      "command": ["python", "expense_tracker.py"],
+      "exit_code": 0,
+      "total_spending": 60.5,
+      "category_totals": {"food": 48.5, "transport": 12.0}
+    }
+  },
+  "fixed_behaviors": [
+    "negative refund amounts reduce total spending",
+    "category names are stripped and lower-cased before aggregation"
+  ],
+  "repository_fixture_restored_after_recording": true,
+  "contains_secrets": false
+}
