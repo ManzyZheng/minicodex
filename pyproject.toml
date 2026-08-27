@@ -8,7 +8,12 @@ version = "0.1.0"
 description = "A small, safe, OpenAI-compatible coding agent for teaching and demos"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["openai>=1.30", "python-dotenv>=1.0"]
+dependencies = [
+    "openai>=1.30",
+    "python-dotenv>=1.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
