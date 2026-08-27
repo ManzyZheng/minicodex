@@ -48,18 +48,24 @@ class AgentSession:
         max_turns_per_prompt: int = 20,
         trace: SessionTrace | None = None,
         on_tool_result: Callable[[ToolResult], None] | None = None,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.model = model
         self.tools = tools
         self.max_turns_per_prompt = max_turns_per_prompt
         self.trace = trace
         self.on_tool_result = on_tool_result
+        self.on_event = on_event
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.prompt_count = 0
 
     def _trace(self, event: str, payload: dict[str, Any]) -> None:
         if self.trace:
             self.trace.write(event, payload)
+
+    def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self.on_event:
+            self.on_event(event_type, payload)
 
     @staticmethod
     def _assistant_message(reply: ModelReply) -> dict[str, Any]:
@@ -82,11 +88,22 @@ class AgentSession:
     def _outcome(self, reason: StopReason, text: str, turns: int) -> AgentOutcome:
         outcome = AgentOutcome(reason, text, turns, self._verification_status(), self.tools.last_verification)
         self._trace("final", {"stop_reason": reason.value, "text": text, "turns": turns, "verification_status": outcome.verification_status})
+        self._emit(
+            "turn_completed",
+            {
+                "stop_reason": reason.value,
+                "text": text,
+                "turns": turns,
+                "verification_status": outcome.verification_status,
+                "verification": outcome.verification,
+            },
+        )
         return outcome
 
     def run_turn(self, prompt: str) -> AgentOutcome:
         self.prompt_count += 1
         self.messages.append({"role": "user", "content": prompt})
+        self._emit("user_prompt", {"text": prompt, "prompt_index": self.prompt_count})
         turns = 0
         previous_fingerprint: str | None = None
         repeated = 0
@@ -107,6 +124,8 @@ class AgentSession:
                 self.messages = compact_messages(self.messages)
                 reply = self.model.complete(self.messages, TOOL_SCHEMAS)
                 self._trace("model_reply", {"turn": turns, "content": reply.content, "tool_calls": [c.__dict__ for c in reply.tool_calls]})
+                if reply.content:
+                    self._emit("model_message", {"content": reply.content, "turn": turns})
                 self.messages.append(self._assistant_message(reply))
                 if not reply.tool_calls:
                     if (
@@ -121,12 +140,42 @@ class AgentSession:
                     return self._outcome(StopReason.COMPLETED, reply.content or "", turns)
 
                 for call in reply.tool_calls:
+                    self._emit(
+                        "tool_call",
+                        {"call_id": call.id, "name": call.name, "arguments": call.arguments, "turn": turns},
+                    )
                     fingerprint = json.dumps({"name": call.name, "arguments": call.arguments}, ensure_ascii=False, sort_keys=True)
                     repeated = repeated + 1 if fingerprint == previous_fingerprint else 1
                     previous_fingerprint = fingerprint
                     result = self.tools.execute(call.name, call.id, call.arguments)
                     if self.on_tool_result:
                         self.on_tool_result(result)
+                    self._emit("tool_result", result.to_dict())
+                    if result.ok and isinstance(result.data, dict) and result.data.get("diff"):
+                        self._emit(
+                            "diff",
+                            {
+                                "call_id": call.id,
+                                "path": str(call.arguments.get("path", "")),
+                                "diff": result.data["diff"],
+                            },
+                        )
+                    if call.name == "run_command" and isinstance(result.data, dict):
+                        self._emit(
+                            "command_output",
+                            {
+                                "call_id": call.id,
+                                "argv": result.data.get("argv", call.arguments.get("argv", [])),
+                                "purpose": result.data.get("purpose", call.arguments.get("purpose")),
+                                "exit_code": result.data.get("exit_code"),
+                                "stdout": result.data.get("stdout", ""),
+                                "stderr": result.data.get("stderr", ""),
+                            },
+                        )
+                        self._emit(
+                            "verification",
+                            {"status": self._verification_status(), "evidence": self.tools.last_verification},
+                        )
                     if result.ok:
                         repeated = 0
                         previous_fingerprint = None
@@ -144,6 +193,7 @@ class AgentSession:
             return self._outcome(StopReason.INTERRUPTED, "Interrupted by user.", turns)
         except Exception as exc:
             self._trace("model_error", {"type": type(exc).__name__, "message": str(exc)})
+            self._emit("error", {"code": type(exc).__name__, "message": str(exc)})
             return self._outcome(StopReason.MODEL_ERROR, f"Model error: {exc}", turns)
 
 
@@ -158,6 +208,7 @@ class Agent(AgentSession):
         max_turns: int = 20,
         trace: SessionTrace | None = None,
         on_tool_result: Callable[[ToolResult], None] | None = None,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         super().__init__(
             model,
@@ -165,6 +216,7 @@ class Agent(AgentSession):
             max_turns_per_prompt=max_turns,
             trace=trace,
             on_tool_result=on_tool_result,
+            on_event=on_event,
         )
         self.max_turns = max_turns
 

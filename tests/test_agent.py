@@ -53,7 +53,7 @@ def test_agent_executes_tools_feeds_errors_back_and_finishes(tmp_path: Path) -> 
     ])
     (tmp_path / "test_sample.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
     model.replies[4] = ModelReply(tool_calls=[ToolCall("4", "run_command", {"argv": [sys.executable, "-m", "pytest", "-q"], "purpose": "test"})])
-    agent = Agent(model, ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose: True), max_turns=10)
+    agent = Agent(model, ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True), max_turns=10)
     outcome = agent.run("fix a.txt")
     assert outcome.stop_reason is StopReason.COMPLETED
     assert outcome.verification_status == "VERIFIED"
@@ -68,13 +68,13 @@ def test_agent_executes_tools_feeds_errors_back_and_finishes(tmp_path: Path) -> 
 def test_agent_stops_three_identical_tool_calls_without_progress(tmp_path: Path) -> None:
     call = ToolCall("same", "read_file", {"path": "missing.txt"})
     model = MockModel([ModelReply(tool_calls=[call]), ModelReply(tool_calls=[call]), ModelReply(tool_calls=[call])])
-    outcome = Agent(model, ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose: True), max_turns=10).run("loop")
+    outcome = Agent(model, ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True), max_turns=10).run("loop")
     assert outcome.stop_reason is StopReason.REPEATED_CALL
 
 
 def test_agent_stops_at_max_turns(tmp_path: Path) -> None:
     replies = [ModelReply(tool_calls=[ToolCall(str(i), "list_files", {})]) for i in range(4)]
-    outcome = Agent(MockModel(replies), ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose: True), max_turns=2).run("work")
+    outcome = Agent(MockModel(replies), ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True), max_turns=2).run("work")
     assert outcome.stop_reason is StopReason.MAX_TURNS
     assert outcome.turns == 2
 
@@ -88,7 +88,7 @@ def test_agent_reports_tool_results_to_ui_callback(tmp_path: Path) -> None:
     ])
     agent = Agent(
         model,
-        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose: True),
+        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
         max_turns=3,
         on_tool_result=events.append,
     )
@@ -132,7 +132,7 @@ def test_agent_session_keeps_messages_between_prompts(tmp_path: Path) -> None:
     model = MockModel([ModelReply(content="first done"), ModelReply(content="second done")])
     session = AgentSession(
         model,
-        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose: True),
+        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
         max_turns_per_prompt=20,
     )
 
@@ -151,9 +151,36 @@ def test_agent_session_resets_model_turn_limit_for_each_prompt(tmp_path: Path) -
     model = MockModel([ModelReply(content="one"), ModelReply(content="two")])
     session = AgentSession(
         model,
-        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose: True),
+        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
         max_turns_per_prompt=1,
     )
 
     assert session.run_turn("first").stop_reason is StopReason.COMPLETED
     assert session.run_turn("second").stop_reason is StopReason.COMPLETED
+
+
+def test_agent_session_emits_tool_diff_and_completion_events(tmp_path: Path) -> None:
+    (tmp_path / "value.txt").write_text("old\n", encoding="utf-8")
+    model = MockModel([
+        ModelReply(tool_calls=[ToolCall("read", "read_file", {"path": "value.txt"})]),
+        ModelReply(tool_calls=[ToolCall("edit", "edit_file", {"path": "value.txt", "old_text": "old", "new_text": "new"})]),
+        ModelReply(content="done"),
+        ModelReply(content="changed but not verified"),
+    ])
+    events: list[tuple[str, dict]] = []
+    session = AgentSession(
+        model,
+        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+        on_event=lambda event_type, payload: events.append((event_type, payload)),
+    )
+
+    session.run_turn("change value")
+
+    event_types = [event_type for event_type, _payload in events]
+    assert event_types[0] == "user_prompt"
+    assert event_types.index("tool_call") < event_types.index("tool_result")
+    assert "diff" in event_types
+    assert events[-1][0] == "turn_completed"
+    diff_payload = next(payload for event_type, payload in events if event_type == "diff")
+    assert diff_payload["path"] == "value.txt"
+    assert "+new" in diff_payload["diff"]

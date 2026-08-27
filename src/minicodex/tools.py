@@ -11,7 +11,7 @@ from .models import ToolResult
 from .workspace import WorkspaceError, WorkspaceGuard
 
 
-CommandApprover = Callable[[list[str], str], bool]
+CommandApprover = Callable[[list[str], str, int], bool]
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -131,7 +131,7 @@ class ToolRuntime:
         if not argv or not all(isinstance(x, str) and x for x in argv): return self._failure("run_command", call_id, "INVALID_ARGUMENT", "argv must be a non-empty string array")
         if not 1 <= timeout_sec <= 120: return self._failure("run_command", call_id, "INVALID_ARGUMENT", "timeout_sec must be between 1 and 120")
         if purpose not in {"test", "build", "lint", "other"}: return self._failure("run_command", call_id, "INVALID_ARGUMENT", "purpose must be test, build, lint, or other")
-        if not self.command_approver(argv, purpose): return self._failure("run_command", call_id, "COMMAND_REJECTED", "user rejected command")
+        if not self.command_approver(argv, purpose, timeout_sec): return self._failure("run_command", call_id, "COMMAND_REJECTED", "user rejected command")
         child_env = os.environ.copy()
         for secret_name in ("MINICODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
             child_env.pop(secret_name, None)

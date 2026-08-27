@@ -23,9 +23,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def confirm_command(argv: list[str], purpose: str) -> bool:
+def confirm_command(argv: list[str], purpose: str, timeout_sec: int) -> bool:
     print("\n[permission] The agent wants to run this argv command:")
     print(f"  purpose: {purpose}" + (" (success will verify current changes)" if purpose in {"test", "build", "lint"} else ""))
+    print(f"  timeout: {timeout_sec}s")
     print("  " + repr(argv))
     try:
         answer = input("Allow? [y/N] ").strip().lower()

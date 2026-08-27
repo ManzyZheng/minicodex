@@ -6,7 +6,7 @@ from pathlib import Path
 from minicodex.tools import ToolRuntime
 
 
-def runtime(tmp_path: Path, *, approve=lambda _argv, _purpose: True) -> ToolRuntime:
+def runtime(tmp_path: Path, *, approve=lambda _argv, _purpose, _timeout: True) -> ToolRuntime:
     return ToolRuntime(tmp_path, command_approver=approve)
 
 
@@ -57,7 +57,7 @@ def test_file_listing_search_and_workspace_errors_are_results(tmp_path: Path) ->
 
 
 def test_command_requires_approval_and_uses_argv(tmp_path: Path) -> None:
-    denied = runtime(tmp_path, approve=lambda _argv, _purpose: False).run_command(
+    denied = runtime(tmp_path, approve=lambda _argv, _purpose, _timeout: False).run_command(
         "c1", [sys.executable, "-c", "print('should-not-run')"], purpose="test"
     )
     assert denied.error and denied.error.code == "COMMAND_REJECTED"
@@ -112,8 +112,9 @@ def test_command_does_not_inherit_minicodex_api_key(tmp_path: Path, monkeypatch)
     assert result.data["stdout"].strip() == "absent"
 
 
-def test_command_approval_receives_verification_purpose(tmp_path: Path) -> None:
+def test_command_approval_receives_purpose_and_timeout(tmp_path: Path) -> None:
     approvals = []
-    tools = runtime(tmp_path, approve=lambda argv, purpose: approvals.append((argv, purpose)) or False)
-    tools.run_command("c", [sys.executable, "-V"], purpose="lint")
+    tools = runtime(tmp_path, approve=lambda argv, purpose, timeout: approvals.append((argv, purpose, timeout)) or False)
+    tools.run_command("c", [sys.executable, "-V"], purpose="lint", timeout_sec=17)
     assert approvals[0][1] == "lint"
+    assert approvals[0][2] == 17
