@@ -1,11 +1,17 @@
 "use strict";
 
 (function exposeMarkdown(root) {
+  function decodeCodePoint(match, value, radix) {
+    const point = Number.parseInt(value, radix);
+    if (!Number.isSafeInteger(point) || point < 0 || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff)) return match;
+    return String.fromCodePoint(point);
+  }
+
   function decodeEntities(text) {
     const named = {amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " "};
     return String(text)
-      .replace(/&#x([0-9a-f]+);/gi, (_match, value) => String.fromCodePoint(parseInt(value, 16)))
-      .replace(/&#([0-9]+);/g, (_match, value) => String.fromCodePoint(parseInt(value, 10)))
+      .replace(/&#x([0-9a-f]+);/gi, (match, value) => decodeCodePoint(match, value, 16))
+      .replace(/&#([0-9]+);/g, (match, value) => decodeCodePoint(match, value, 10))
       .replace(/&([a-z]+);/gi, (match, value) => named[value.toLowerCase()] ?? match);
   }
 
@@ -34,7 +40,7 @@
 
   function startsBlock(lines, index) {
     const line = lines[index] || "";
-    return /^```/.test(line) || /^#{1,6}\s+/.test(line) || /^\s*([-*+] |\d+\. )/.test(line) ||
+    return /^```/.test(line) || /^#{1,6}\s+.+$/.test(line) || /^\s*(?:[-*+]\s+.+|\d+\.\s+.+)$/.test(line) ||
       (line.includes("|") && isTableDivider(lines[index + 1] || ""));
   }
 
@@ -85,12 +91,12 @@
         container.append(table);
         continue;
       }
-      const listMatch = lines[index].match(/^\s*([-*+] |\d+\. )(.+)$/);
+      const listMatch = lines[index].match(/^\s*([-*+]\s+|\d+\.\s+)(.+)$/);
       if (listMatch) {
         const ordered = /\d/.test(listMatch[1]);
         const list = document.createElement(ordered ? "ol" : "ul");
         while (index < lines.length) {
-          const itemMatch = lines[index].match(/^\s*([-*+] |\d+\. )(.+)$/);
+          const itemMatch = lines[index].match(/^\s*([-*+]\s+|\d+\.\s+)(.+)$/);
           if (!itemMatch || /\d/.test(itemMatch[1]) !== ordered) break;
           const item = document.createElement("li");
           appendInline(item, itemMatch[2]);
@@ -102,6 +108,7 @@
       }
       const paragraph = [];
       while (index < lines.length && lines[index].trim() && !startsBlock(lines, index)) paragraph.push(lines[index++].trim());
+      if (paragraph.length === 0) paragraph.push(lines[index++].trim());
       const node = document.createElement("p");
       appendInline(node, paragraph.join(" "));
       container.append(node);
