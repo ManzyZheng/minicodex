@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from minicodex.agent import Agent, StopReason
+from minicodex.agent import Agent, AgentSession, StopReason
 from minicodex.context import compact_messages, serialize_tool_result, truncate_text
 from minicodex.models import ModelReply, ToolCall
 from minicodex.session import SessionTrace
@@ -126,3 +126,34 @@ def test_context_compaction_preserves_specific_prior_state() -> None:
     assert "read_file" in summary
     assert "READ_ERROR" in summary
     assert compacted[2].get("role") != "tool"
+
+
+def test_agent_session_keeps_messages_between_prompts(tmp_path: Path) -> None:
+    model = MockModel([ModelReply(content="first done"), ModelReply(content="second done")])
+    session = AgentSession(
+        model,
+        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose: True),
+        max_turns_per_prompt=20,
+    )
+
+    first = session.run_turn("first task")
+    second = session.run_turn("second task")
+
+    assert first.final_text == "first done"
+    assert second.final_text == "second done"
+    second_request = model.messages_seen[1]
+    assert any(message.get("content") == "first task" for message in second_request)
+    assert any(message.get("content") == "first done" for message in second_request)
+    assert second_request[-1] == {"role": "user", "content": "second task"}
+
+
+def test_agent_session_resets_model_turn_limit_for_each_prompt(tmp_path: Path) -> None:
+    model = MockModel([ModelReply(content="one"), ModelReply(content="two")])
+    session = AgentSession(
+        model,
+        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose: True),
+        max_turns_per_prompt=1,
+    )
+
+    assert session.run_turn("first").stop_reason is StopReason.COMPLETED
+    assert session.run_turn("second").stop_reason is StopReason.COMPLETED

@@ -39,21 +39,23 @@ class AgentOutcome:
     verification: dict[str, Any] | None = None
 
 
-class Agent:
+class AgentSession:
     def __init__(
         self,
         model: Model,
         tools: ToolRuntime,
         *,
-        max_turns: int = 20,
+        max_turns_per_prompt: int = 20,
         trace: SessionTrace | None = None,
         on_tool_result: Callable[[ToolResult], None] | None = None,
     ) -> None:
         self.model = model
         self.tools = tools
-        self.max_turns = max_turns
+        self.max_turns_per_prompt = max_turns_per_prompt
         self.trace = trace
         self.on_tool_result = on_tool_result
+        self.messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.prompt_count = 0
 
     def _trace(self, event: str, payload: dict[str, Any]) -> None:
         if self.trace:
@@ -82,24 +84,39 @@ class Agent:
         self._trace("final", {"stop_reason": reason.value, "text": text, "turns": turns, "verification_status": outcome.verification_status})
         return outcome
 
-    def run(self, task: str) -> AgentOutcome:
-        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
+    def run_turn(self, prompt: str) -> AgentOutcome:
+        self.prompt_count += 1
+        self.messages.append({"role": "user", "content": prompt})
         turns = 0
         previous_fingerprint: str | None = None
         repeated = 0
         verification_nudged = False
-        self._trace("session_start", {"task": task, "workspace": str(self.tools.guard.root), "max_turns": self.max_turns})
+        if self.prompt_count == 1:
+            self._trace(
+                "session_start",
+                {
+                    "task": prompt,
+                    "workspace": str(self.tools.guard.root),
+                    "max_turns": self.max_turns_per_prompt,
+                },
+            )
+        self._trace("prompt_start", {"prompt": prompt, "prompt_index": self.prompt_count})
         try:
-            while turns < self.max_turns:
+            while turns < self.max_turns_per_prompt:
                 turns += 1
-                messages = compact_messages(messages)
-                reply = self.model.complete(messages, TOOL_SCHEMAS)
+                self.messages = compact_messages(self.messages)
+                reply = self.model.complete(self.messages, TOOL_SCHEMAS)
                 self._trace("model_reply", {"turn": turns, "content": reply.content, "tool_calls": [c.__dict__ for c in reply.tool_calls]})
-                messages.append(self._assistant_message(reply))
+                self.messages.append(self._assistant_message(reply))
                 if not reply.tool_calls:
-                    if self.tools.change_seq and self._verification_status() == "NOT_RUN" and not verification_nudged and turns < self.max_turns:
+                    if (
+                        self.tools.change_seq
+                        and self._verification_status() == "NOT_RUN"
+                        and not verification_nudged
+                        and turns < self.max_turns_per_prompt
+                    ):
                         verification_nudged = True
-                        messages.append({"role": "user", "content": "You changed files but have not verified them. If possible, run a test, build, or lint command now; otherwise explain why verification cannot be run."})
+                        self.messages.append({"role": "user", "content": "You changed files but have not verified them. If possible, run a test, build, or lint command now; otherwise explain why verification cannot be run."})
                         continue
                     return self._outcome(StopReason.COMPLETED, reply.content or "", turns)
 
@@ -114,13 +131,42 @@ class Agent:
                         repeated = 0
                         previous_fingerprint = None
                     content = serialize_tool_result(result)
-                    messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
+                    self.messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
                     self._trace("tool_result", result.to_dict())
                     if repeated >= 3:
                         return self._outcome(StopReason.REPEATED_CALL, "Stopped after three identical failed tool calls without progress.", turns)
-            return self._outcome(StopReason.MAX_TURNS, f"Stopped after reaching the maximum of {self.max_turns} model turns.", turns)
+            return self._outcome(
+                StopReason.MAX_TURNS,
+                f"Stopped after reaching the maximum of {self.max_turns_per_prompt} model turns.",
+                turns,
+            )
         except KeyboardInterrupt:
             return self._outcome(StopReason.INTERRUPTED, "Interrupted by user.", turns)
         except Exception as exc:
             self._trace("model_error", {"type": type(exc).__name__, "message": str(exc)})
             return self._outcome(StopReason.MODEL_ERROR, f"Model error: {exc}", turns)
+
+
+class Agent(AgentSession):
+    """Backward-compatible one-shot Agent used by the terminal CLI."""
+
+    def __init__(
+        self,
+        model: Model,
+        tools: ToolRuntime,
+        *,
+        max_turns: int = 20,
+        trace: SessionTrace | None = None,
+        on_tool_result: Callable[[ToolResult], None] | None = None,
+    ) -> None:
+        super().__init__(
+            model,
+            tools,
+            max_turns_per_prompt=max_turns,
+            trace=trace,
+            on_tool_result=on_tool_result,
+        )
+        self.max_turns = max_turns
+
+    def run(self, task: str) -> AgentOutcome:
+        return self.run_turn(task)
