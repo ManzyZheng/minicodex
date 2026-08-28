@@ -49,6 +49,16 @@ def print_tool_result(result: ToolResult) -> None:
             print(visible.rstrip())
 
 
+def print_agent_event(event_type: str, payload: dict) -> None:
+    if event_type != "model_reasoning":
+        return
+    content = str(payload.get("content") or "").strip()
+    if not content:
+        return
+    visible, _ = truncate_text(content, limit=8_000)
+    print(f"\n[thinking:turn {payload.get('turn', '—')}]\n{visible.rstrip()}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.max_turns < 1:
@@ -88,7 +98,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"MiniCodex workspace: {workspace}")
     print(f"Session trace: {trace_path}")
-    outcome = Agent(model, runtime, max_turns=config.max_turns, trace=trace, on_tool_result=print_tool_result).run(task)
+    outcome = Agent(
+        model,
+        runtime,
+        max_turns=config.max_turns,
+        trace=trace,
+        on_tool_result=print_tool_result,
+        on_event=print_agent_event,
+    ).run(task)
 
     print("\n--- MiniCodex result ---")
     print(outcome.final_text)

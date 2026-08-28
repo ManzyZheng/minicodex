@@ -9,7 +9,7 @@ from pathlib import Path
 import uvicorn
 
 from .agent import AgentSession
-from .cli import print_tool_result
+from .cli import print_agent_event, print_tool_result
 from .config import Config, ConfigError
 from .model_adapter import OpenAIChatModel
 from .session import SessionTrace
@@ -38,6 +38,11 @@ def local_console_url(port: int, access_token: str) -> str:
     return f"http://127.0.0.1:{port}/?token={access_token}"
 
 
+def publish_agent_event(events: EventBus, event_type: str, payload: dict) -> None:
+    events.publish(event_type, payload)
+    print_agent_event(event_type, payload)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.max_turns < 1:
@@ -64,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             max_turns_per_prompt=config.max_turns,
             trace=trace,
             on_tool_result=print_tool_result,
-            on_event=events.publish,
+            on_event=lambda event_type, payload: publish_agent_event(events, event_type, payload),
         )
         session = WebSession(
             agent,

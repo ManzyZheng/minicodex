@@ -218,3 +218,27 @@ def test_final_reply_emits_once_and_keeps_final_turn_number(tmp_path: Path) -> N
     completed = next(payload for event_type, payload in events if event_type == "turn_completed")
     assert completed["text"] == "## Finished\n\nAll tests passed."
     assert completed["turns"] == 1
+
+
+def test_agent_emits_and_traces_reasoning_without_mixing_it_into_final_text(tmp_path: Path) -> None:
+    events: list[tuple[str, dict]] = []
+    trace_path = tmp_path / "reasoning.jsonl"
+    reply = ModelReply(content="final answer")
+    reply.reasoning_content = "inspect the implementation first"
+    session = AgentSession(
+        MockModel([reply]),
+        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+        trace=SessionTrace(trace_path),
+        on_event=lambda event_type, payload: events.append((event_type, payload)),
+    )
+
+    outcome = session.run_turn("explain the code")
+
+    reasoning_index = next(index for index, event in enumerate(events) if event[0] == "model_reasoning")
+    completed_index = next(index for index, event in enumerate(events) if event[0] == "turn_completed")
+    assert reasoning_index < completed_index
+    assert events[reasoning_index][1] == {"content": "inspect the implementation first", "turn": 1}
+    assert outcome.final_text == "final answer"
+    records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    model_record = next(record for record in records if record["event"] == "model_reply")
+    assert model_record["payload"]["reasoning_content"] == "inspect the implementation first"

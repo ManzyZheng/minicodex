@@ -81,7 +81,10 @@ global.fetch = async () => ({
 class FakeEventSource {
   constructor(url) { this.url = url; this.listeners = {}; FakeEventSource.instance = this; }
   addEventListener(name, callback) { this.listeners[name] = callback; }
-  emit(name, data, id) { this.listeners[name]({data: JSON.stringify(data), lastEventId: String(id)}); }
+  emit(name, data, id) {
+    assert.ok(this.listeners[name], `missing frontend handler for ${name}`);
+    this.listeners[name]({data: JSON.stringify(data), lastEventId: String(id)});
+  }
 }
 global.EventSource = FakeEventSource;
 
@@ -91,12 +94,14 @@ setImmediate(() => {
   const source = FakeEventSource.instance;
   assert.match(source.url, /after=0(?:&|$)/, "refresh should replay retained events to rebuild turn history");
   source.emit("user_prompt", {prompt_index: 1, text: "fix the bug"}, 1);
-  source.emit("model_message", {turn: 1, content: "I will inspect the tests."}, 2);
-  source.emit("tool_result", {ok: true, tool: "read_file", summary: "read 10 characters"}, 3);
-  source.emit("turn_completed", {turns: 2, text: "First result", verification_status: "VERIFIED"}, 4);
-  source.emit("user_prompt", {prompt_index: 2, text: "add export"}, 5);
-  source.emit("tool_result", {ok: true, tool: "edit_file", summary: "updated tracker.py"}, 6);
-  source.emit("turn_completed", {turns: 3, text: "Second result", verification_status: "VERIFIED"}, 7);
+  source.emit("model_reasoning", {turn: 1, content: "Need inspect the failing tests."}, 2);
+  source.emit("model_message", {turn: 1, content: "I will inspect the tests."}, 3);
+  source.emit("tool_result", {ok: true, tool: "read_file", summary: "read 10 characters"}, 4);
+  source.emit("turn_completed", {turns: 2, text: "First result", verification_status: "VERIFIED"}, 5);
+  source.emit("user_prompt", {prompt_index: 2, text: "add export"}, 6);
+  source.emit("model_reasoning", {turn: 1, content: "Need inspect the export flow."}, 7);
+  source.emit("tool_result", {ok: true, tool: "edit_file", summary: "updated tracker.py"}, 8);
+  source.emit("turn_completed", {turns: 3, text: "Second result", verification_status: "VERIFIED"}, 9);
 
   const groups = nodes.timeline.querySelectorAll(".turn-group");
   assert.equal(groups.length, 2, "events should be grouped by user prompt");
@@ -107,9 +112,11 @@ setImmediate(() => {
   const latestFinal = groups[1].querySelector(".turn-final");
   assert.equal(latestProcess.open, false, "completed execution details should be collapsed");
   assert.match(latestProcess.textContent, /add export/, "the full prompt should collapse with execution details");
+  assert.match(latestProcess.textContent, /Need inspect the export flow/);
   assert.match(latestFinal.textContent, /Second result/);
   assert.match(groups[1].querySelector(".turn-summary").textContent, /PROMPT 2/);
   assert.match(groups[1].querySelector(".turn-summary").textContent, /TURN 3/);
   assert.doesNotMatch(latestFinal.textContent, /updated tracker\.py/, "tool trace must stay outside the final answer");
+  assert.doesNotMatch(latestFinal.textContent, /Need inspect the export flow/, "reasoning must stay outside the final answer");
   console.log("turn timeline grouping: ok");
 });

@@ -52,7 +52,7 @@ class OpenAIChatModel:
                     "tool_choice": "auto",
                 }
                 if self.enable_thinking:
-                    request["extra_body"] = {"enable_thinking": True}
+                    request["extra_body"] = {"enable_thinking": True, "preserve_thinking": False}
                 response = self.client.chat.completions.create(**request)
                 message = response.choices[0].message
                 calls = []
@@ -61,7 +61,11 @@ class OpenAIChatModel:
                     if not isinstance(arguments, dict):
                         raise ValueError(f"tool arguments for {call.function.name} must be a JSON object")
                     calls.append(ToolCall(call.id, call.function.name, arguments))
-                return ModelReply(content=message.content, tool_calls=calls)
+                return ModelReply(
+                    content=message.content,
+                    tool_calls=calls,
+                    reasoning_content=getattr(message, "reasoning_content", None) or None,
+                )
             except Exception as exc:
                 if attempt == 2 or not self._is_transient(exc):
                     raise

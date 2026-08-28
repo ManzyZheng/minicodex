@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from minicodex.model_adapter import OpenAIChatModel
 
 
-def response(*, content="answer", tool_calls=None):
-    message = SimpleNamespace(content=content, tool_calls=tool_calls or [])
+def response(*, content="answer", reasoning_content=None, tool_calls=None):
+    message = SimpleNamespace(content=content, reasoning_content=reasoning_content, tool_calls=tool_calls or [])
     return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
@@ -48,7 +48,17 @@ def test_openai_adapter_retries_transient_status_three_attempts() -> None:
 
 
 def test_openai_adapter_enables_qwen_thinking_in_extra_body() -> None:
-    completions = FakeCompletions([response(content="ok")])
+    completions = FakeCompletions([response(content="ok", reasoning_content="inspect the failing test")])
     model = OpenAIChatModel(client_with(completions), model="qwen3.8-flash", enable_thinking=True)
-    model.complete([{"role": "user", "content": "hello"}], [])
-    assert completions.calls[0]["extra_body"] == {"enable_thinking": True}
+    reply = model.complete([{"role": "user", "content": "hello"}], [])
+    assert reply.reasoning_content == "inspect the failing test"
+    assert completions.calls[0]["extra_body"] == {"enable_thinking": True, "preserve_thinking": False}
+
+
+def test_openai_adapter_accepts_compatible_models_without_reasoning_field() -> None:
+    message = SimpleNamespace(content="plain answer", tool_calls=[])
+    completions = FakeCompletions([SimpleNamespace(choices=[SimpleNamespace(message=message)])])
+    model = OpenAIChatModel(client_with(completions), model="plain-model")
+    reply = model.complete([], [])
+    assert reply.content == "plain answer"
+    assert reply.reasoning_content is None

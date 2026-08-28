@@ -10,6 +10,7 @@
 - 同一浏览器页面中的连续多轮会话：复用消息历史、已读文件集合、工作区修改状态和验证状态。
 - 本机 Web Console：通过 SSE 实时展示模型回复、工具调用、命令输出、彩色 Diff 与命令审批；终端同步保留工具输出。
 - OpenAI-compatible Chat Completions Tool Calling；支持自定义 `base_url`。
+- Qwen thinking：非流式读取独立 `reasoning_content`，在终端、Web 执行过程和 JSONL Trace 中展示，不与最终答案混合。
 - 六个工具：`list_files`、`search_text`、`read_file`、`write_file`、`edit_file`、`run_command`。
 - Workspace Boundary：所有路径 resolve 后必须仍位于指定项目目录，阻止 `..`、绝对路径和符号链接逃逸。
 - Read-before-edit：已有文件必须先读再写；新文件可以直接创建。
@@ -153,7 +154,7 @@ minicodex/
 
 ### `model_adapter.py`：OpenAI-compatible 适配
 
-适配器使用 Chat Completions Tool Calling 格式，把 SDK 返回的函数名、调用 ID 和 JSON 参数转换成内部 `ToolCall`。对 429、5xx、连接失败和超时最多尝试三次，并使用短指数退避。启用 Qwen thinking 时加入 `extra_body={"enable_thinking": true}`；当前采用非流式请求，确保一次取得完整 Tool Calls。
+适配器使用 Chat Completions Tool Calling 格式，把 SDK 返回的函数名、调用 ID 和 JSON 参数转换成内部 `ToolCall`。对 429、5xx、连接失败和超时最多尝试三次，并使用短指数退避。启用 Qwen thinking 时加入 `extra_body={"enable_thinking": true, "preserve_thinking": false}`；当前采用非流式请求，一次取得完整 `reasoning_content`、最终正文和 Tool Calls。关闭 preserved thinking 可以避免历史思考迅速扩大上下文，也不要求压缩后的历史完整回传供应商特有字段。
 
 ### `agent.py`：单 Agent 状态机
 
@@ -233,7 +234,7 @@ MINICODEX_BASE_URL=https://ws-2r6gaasmu4dyhxq0.cn-beijing.maas.aliyuncs.com/comp
 MINICODEX_ENABLE_THINKING=true
 ```
 
-复制 `.env.example` 为 `.env` 并替换 Key 即可。`.env` 已被 Git 忽略；程序优先读取 `MINICODEX_API_KEY`，未配置时回退到 `DASHSCOPE_API_KEY`。Qwen 思考模式通过非流式请求的 `extra_body={"enable_thinking": true}` 开启，以便一次取得完整 Tool Calls。
+复制 `.env.example` 为 `.env` 并替换 Key 即可。`.env` 已被 Git 忽略；程序优先读取 `MINICODEX_API_KEY`，未配置时回退到 `DASHSCOPE_API_KEY`。Qwen 思考模式通过非流式请求开启：适配器从 `message.reasoning_content` 读取完整思考字段，通过独立 `model_reasoning` 事件显示；最终答案仍来自 `message.content`。当前显式设置 `preserve_thinking=false`，不把历史思考回传到后续模型请求。
 
 ## 使用
 
@@ -270,7 +271,7 @@ minicodex-web --workspace .\demo\buggy_expense_tracker --port 8000
 
 本机服务仍按不可信 HTTP 接口防护：每次启动生成 256-bit 级随机令牌，所有 `/api/*` 与 SSE 请求都必须携带；服务同时拒绝非 loopback `Host`、跨站 `Origin`，并设置 CSP、`no-referrer` 和 `nosniff`。这能阻断普通恶意网页与 DNS rebinding 直接读取事件或替用户批准命令。令牌只应保留在本机终端和地址栏，不要复制到截图、日志或他人可访问的位置；拥有该 URL 的本机进程或浏览器扩展仍应视为拥有本次 Agent 会话权限。
 
-Web 模式依然使用原来的 `AgentSession` 和 `ToolRuntime`。一次只接受一个 Prompt，后台单 Worker 串行运行；结束后可以继续发送下一条 Prompt，历史消息、read-before-edit 已读集合、文件变化序号和验证状态都会保留。工具结果同时交给浏览器事件总线和 `print_tool_result()`，所以页面与启动服务的终端都能看到执行证据。
+Web 模式依然使用原来的 `AgentSession` 和 `ToolRuntime`。一次只接受一个 Prompt，后台单 Worker 串行运行；结束后可以继续发送下一条 Prompt，历史消息、read-before-edit 已读集合、文件变化序号和验证状态都会保留。工具结果和独立 thinking 字段都会同时交给浏览器事件总线与终端打印器，所以两个界面都能看到执行证据；任务完成后，Web 页面把 thinking 连同工具、Diff 和测试输出折叠，只默认展开最终答案。
 
 ### SSE 如何工作
 

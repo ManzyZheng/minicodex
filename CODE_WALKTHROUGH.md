@@ -369,10 +369,12 @@ OpenAI Tool Calling 协议要求 assistant 发出的每个 tool call 都有对�
 当 `MINICODEX_ENABLE_THINKING=true` 时发送：
 
 ```python
-extra_body={"enable_thinking": True}
+extra_body={"enable_thinking": True, "preserve_thinking": False}
 ```
 
-当前请求是非流式，且适配器只读取 `message.content` 和 `message.tool_calls`。供应商特有的 `reasoning_content` 没有进入内部消息或前端；页面显示的是模型阶段性正文和工具执行轨迹，不是隐藏思维链。
+当前请求是非流式，适配器分别读取 `message.reasoning_content`、`message.content` 和 `message.tool_calls`，转换成内部 `ModelReply`。reasoning 通过独立 `model_reasoning` 事件进入终端、Web 执行过程和 JSONL Trace，不会拼接进最终 `content`。因此最终答案仍保持干净；任务结束后，前端会把 thinking 连同工具、Diff 和测试输出一起折叠。
+
+这里显式关闭 `preserve_thinking`：当前轮仍会思考并返回 reasoning，但后续请求不需要完整回传历史 reasoning。这样与 MiniCodex 的确定性历史压缩兼容，也避免思考内容快速增加上下文成本。如果未来开启 preserved thinking，就必须完整、原样、按顺序保存并回传供应商特有字段，不能把它拼到 `content`。
 
 瞬时错误包括 429、5xx、连接错误和超时，最多尝试三次，等待约 0.5 秒、1 秒。解析错误等非瞬时错误不会盲目重试。
 
@@ -416,6 +418,8 @@ extra_body={"enable_thinking": True}
 - `tool_result`；
 - `model_error`；
 - `final`。
+
+`model_reply` 会分别记录 `reasoning_content` 和 `content`。Trace 因此可能包含完整思考、源码和 Prompt，只适合本地复盘，不应提交到 Git 或直接公开分享。
 
 逐行 JSON 的优点是进程中途退出时，之前的完整行仍可读取，也方便用脚本流式统计。Trace 可能包含源码、Prompt 和本机路径，因此 `.minicodex/` 必须保持在 `.gitignore` 中。
 
@@ -519,7 +523,7 @@ FastAPI 中间件要求：
 2. `beginTurn()`：新 Prompt 创建轮次组并折叠上一轮；
 3. `addCard()/addCompactLine()`：渲染 Diff、命令、错误和简洁工具行；
 4. `completeTurn()`：折叠执行过程，只展开最终 Markdown；
-5. `handlers`：每种 SSE 事件映射到哪个 UI 动作；
+5. `handlers`：把 `model_reasoning` 渲染为 `THINKING · TURN N`，并映射其他 SSE 事件；
 6. `loadSnapshot()`：刷新时恢复状态和 pending approval；
 7. `connectEvents()`：建立 SSE；
 8. `submitPrompt()/decideApproval()`：浏览器到服务器的两个 POST 方向。
@@ -550,15 +554,15 @@ Markdown 渲染只用 `createElement`、`createTextNode`、`textContent` 和 `re
 |---|---|
 | `test_core.py` | 配置、ToolResult、WorkspaceGuard、Trace |
 | `test_tools.py` | 六工具、边界逃逸、read-before-edit、唯一匹配、命令确认、FAILED 证据 |
-| `test_agent.py` | Mock Model Loop、错误回灌、VERIFIED、终止条件、连续会话、事件顺序 |
-| `test_model_adapter.py` | Tool Call 解析、Qwen thinking 参数、瞬时错误重试 |
-| `test_cli.py` | 参数校验、Ctrl+C、退出码 |
+| `test_agent.py` | Mock Model Loop、错误回灌、VERIFIED、reasoning 事件与 Trace、终止条件、连续会话 |
+| `test_model_adapter.py` | Tool Call 与 reasoning 解析、Qwen thinking/preserve 参数、瞬时错误重试 |
+| `test_cli.py` | 参数校验、Ctrl+C、退出码和有限长 thinking 输出 |
 | `test_web_events.py` | 事件 ID、保留窗口、订阅和重放 |
 | `test_web_approval.py` | allow/reject/timeout/close |
 | `test_web_session.py` | 单 Worker、连续 Prompt、状态快照 |
 | `test_web_api.py` | token、Host、Origin、Prompt 和 SSE API |
 | `test_web_static.py` | 静态资源与禁止 innerHTML |
-| `test_frontend_timeline.py` | 当前轮展开、历史折叠、最终 TURN、刷新重建 |
+| `test_frontend_timeline.py` | 当前轮 thinking、历史折叠、最终答案隔离、最终 TURN、刷新重建 |
 | `test_markdown_renderer.py` | Markdown、安全文本和异常输入不死循环 |
 
 Mock Model 的核心思想是预先给出固定 `ModelReply` 列表：第一次故意违反 read-before-edit，第二次读取，第三次编辑，之后运行 pytest。测试不仅断言最终文件，还检查模型下一轮是否真的收到 `READ_REQUIRED` ToolResult。
@@ -624,4 +628,3 @@ argv 加 `shell=False` 消除 shell 元字符解析，行为更可预测，也�
 - **安全层**：Workspace、先读后改、唯一匹配、argv 和人工审批限制副作用。
 - **证据层**：Diff、stdout/stderr、change_seq、VERIFIED 和 JSONL 让结果可追踪。
 - **Web 层**：同一 Session 通过 SSE 实时展示，并用 HTTP 完成 Prompt 和审批。
-

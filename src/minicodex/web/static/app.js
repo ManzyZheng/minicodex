@@ -173,6 +173,7 @@ const handlers = {
   session_started(data) { $("#workspace-path").textContent = data.workspace || "—"; $("#model-name").textContent = data.model || "—"; },
   status(data) { setStatus(data.value); },
   user_prompt(data) { beginTurn(data); },
+  model_reasoning(data) { if (data.content) addCard("model_reasoning", `THINKING · TURN ${data.turn || "—"}`, data.content, "summary"); },
   model_message(data) { addCard("model_message", `AGENT · TURN ${data.turn || "—"}`, data.content, "summary"); },
   tool_result(data) {
     if (data.ok) {
