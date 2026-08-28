@@ -7,7 +7,7 @@
 
 把当前“内部事件时间线”重构为面向用户的本机 Coding Agent 工作台：中央区域像 Codex 一样以对话和最终结果为主，文件变更汇总位于回答下方，点击文件后在右侧审查累计 Diff。运行过程默认折叠，只展示少量有价值的中文进展，不直接倾倒供应商原始 `reasoning_content`。
 
-同时升级 Plan Mode：Agent 可以根据用户意图自主进入只读规划状态，但不能自主从 PLAN 获得写权限。计划完成后必须由用户选择 `AUTO-ACT` 执行、`ACT` 审阅执行或继续规划。
+同时升级 Plan Mode：Agent 可以根据用户意图自主进入只读规划状态，但不能自主从 PLAN 获得写权限。`ACT / AUTO-ACT` 是用户持续选择的执行权限，PLAN 只是临时只读阶段；计划完成后询问是否执行，批准后按当前执行权限继续，用户输入反馈则保持只读并继续规划。
 
 本次仍保持单 Agent、单 Workspace、SSE、原生 HTML/CSS/JavaScript 和六个核心工作区工具，不扩展 MCP、多 Agent、复杂流式 Tool Calling 或浏览器代码编辑器。
 
@@ -25,7 +25,7 @@
 ### 3.1 必须实现
 
 - Codex 式单页对话布局，底部固定输入框。
-- `ACT / AUTO-ACT` 与模型选择器放入输入框底部工具栏。
+- `ACT / AUTO-ACT` 与模型选择器放入输入框底部工具栏，不再增加工作方式选择器。
 - 顶栏只保留 MiniCodex、Workspace、运行状态和验证状态等轻量信息。
 - 当前轮显示最新重要进展；完成后最终回答展开、执行过程折叠。
 - 执行过程展示中文摘要，命令 stdout/stderr 再次展开后显示原文。
@@ -34,7 +34,7 @@
 - 同一文件多次修改时，审查区显示从本轮首次修改前到当前内容的累计 Diff。
 - Agent 控制工具 `enter_plan_mode`、`exit_plan_mode`。
 - Agent 可自主进入 PLAN；计划完成后由用户选择自动执行、审阅修改或继续规划。
-- 手动“只规划 / 自动判断 / 直接执行”工作方式入口。
+- Agent 根据自然语言自主进入 PLAN；用户也可通过“先规划、不要修改”等明确指令强制本轮规划。
 - 页面刷新和 SSE 重放后能恢复模式、变更集合、最终回答和待审批状态。
 - 保留终端输出与 JSONL Trace；原始 reasoning 可继续进入 Trace，但不进入普通 Web UI。
 
@@ -68,7 +68,7 @@
 │ tests/test_...            +8 -0    │                              │
 ├───────────────────────────────────┴──────────────────────────────┤
 │ 输入下一条指令……                                        发送    │
-│ +  自动判断   ACT   qwen3.8-flash                                │
+│ +  ACT   qwen3.8-flash                                           │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -84,21 +84,20 @@
 - `NOT_RUN / FAILED / VERIFIED`；
 - 打开或关闭代码审查的入口。
 
-模型、工作方式和执行权限属于“下一条指令如何运行”，放在输入框内，不放在全局状态栏。
+模型和执行权限属于“下一条指令如何运行”，放在输入框内，不放在全局状态栏。PLAN 作为临时工作阶段显示在对话与状态区域，不成为第二个持久选择器。
 
 ### 4.3 输入框
 
 输入框参考 Codex 的组合式 Composer：正文输入位于上方，底部一行放控制项。
 
 ```text
-+  [自动判断⌄]  [ACT⌄]  [qwen3.8-flash⌄]                 [发送]
++  [ACT⌄]  [qwen3.8-flash⌄]                              [发送]
 ```
 
-- 工作方式：`自动判断 / 只规划 / 直接执行`；
 - 执行权限：`ACT / AUTO-ACT`；
 - 模型：当前配置模型；第一版只展示并选择后端已经允许的模型值，不在浏览器接触 API Key；
-- 运行期间三个选择器禁用，避免中途改变语义；
-- `PLAN` 是当前工作流状态，不再与 `ACT/AUTO-ACT` 放在同一个权限下拉框。
+- 运行期间两个选择器禁用，避免中途改变语义；
+- `PLAN` 不是权限菜单选项。Agent 进入 PLAN 后，Composer 显示“只读规划中 · 执行时使用 ACT/AUTO-ACT”，但底层执行权限选择不改变。
 
 ## 5. 对话展示
 
@@ -204,16 +203,25 @@ file_changes[path] = {
 - 审查面板只读，不实现编辑、撤销、暂存或提交；
 - ACT 的写入前审批仍用模态框显示待应用 Diff，与写入后的审查面板职责不同。
 
-## 7. 工作方式与权限状态机
+## 7. PLAN 阶段与执行权限状态机
 
-### 7.1 两个维度
+### 7.1 持久权限与临时阶段
 
-工作方式与权限分离：
+运行时保存两个互不覆盖的状态：
 
-- 工作方式：`AUTO / PLAN / EXECUTE`；
-- 执行权限：`ACT / AUTO-ACT`。
+- `execution_mode: ACT | AUTO_ACT`：用户在 Composer 中持续选择的执行权限；
+- `plan_state: INACTIVE | PLANNING | WAITING_APPROVAL`：Agent 的临时规划阶段。
 
-`PLAN` 是只读工作流覆盖层。处于 PLAN 时，无论进入前是 ACT 还是 AUTO-ACT，写文件和命令均被拒绝。进入前权限保存在 `pre_plan_mode`，但用户批准计划时可以重新选择目标权限。
+有效权限按以下规则计算：
+
+```python
+if plan_state in {PLANNING, WAITING_APPROVAL}:
+    effective_mode = PLAN
+else:
+    effective_mode = execution_mode
+```
+
+进入 PLAN 不修改 `execution_mode`，因此不需要 `pre_plan_mode` 或恢复逻辑。用户批准计划后只把 `plan_state` 设回 `INACTIVE`，Agent 自然按当前 ACT/AUTO-ACT 继续。
 
 ### 7.2 Agent 控制工具
 
@@ -228,8 +236,7 @@ file_changes[path] = {
 
 `enter_plan_mode`：
 
-- 保存当前执行权限；
-- 切换到只读 PLAN；
+- 把 `plan_state` 设为 `PLANNING`，执行权限保持不变；
 - 更新 System Prompt；
 - 下一轮只暴露读工具和 `exit_plan_mode`；
 - 发出 `mode_changed` / `plan_started`；
@@ -239,31 +246,41 @@ file_changes[path] = {
 
 - 不直接恢复写权限；
 - 把当前计划作为 `plan_ready` 事件提交给 WebSession；
-- Agent 进入 `WAITING_PLAN_APPROVAL`；
-- 等待用户选择；
-- 继续规划时把反馈作为工具结果回灌；
-- 批准执行时才切到 ACT 或 AUTO-ACT 并继续同一 Session。
+- 把 `plan_state` 设为 `WAITING_APPROVAL`；
+- 显示“批准后将使用当前 ACT/AUTO-ACT 执行”；
+- 用户点击“执行方案”或提交明确的“执行”后，把 `plan_state` 设为 `INACTIVE` 并继续同一 Session；
+- 用户输入修改意见时，把反馈作为工具结果回灌，`plan_state` 回到 `PLANNING`；
+- 用户取消方案时放弃 pending plan，回到 `INACTIVE`，不执行任何修改。
 
-### 7.3 自动路由
+### 7.3 自主进入 PLAN
 
-工作方式为 AUTO 时，由模型根据语义选择：
+ACT 和 AUTO-ACT 下都由模型根据语义选择是否临时进入 PLAN：
 
 - 回答、解释、审查、诊断、设计、给方案或明确“先不要改”时进入 PLAN；
-- 修改、修复、添加、构建或实现时可直接按选定执行权限工作；
+- 修改、修复、添加、构建或实现时可直接按当前执行权限工作；
 - 复杂或范围不明确的修改任务可以先进入 PLAN；
 - 不使用关键词正则或额外分类模型。
 
 进入 PLAN 是权限降低，不需弹窗。任何从 PLAN 到可写状态的迁移必须由用户动作触发。
 
-工作方式为 PLAN 时，Session 在 Prompt 开始前直接进入 PLAN；工作方式为 EXECUTE 时，System Prompt 告诉模型不要主动进入 PLAN，除非遇到需要用户决策的实质性歧义。
+用户明确说“先规划、不要修改”时，System Prompt 要求模型进入 PLAN；用户明确说“直接修改、不用先给方案”时直接执行。第一版不增加关键词路由器、工作方式下拉框或额外分类模型。
 
 ### 7.4 计划审批
 
 计划完成后在最终计划下显示：
 
-1. `使用 AUTO-ACT 执行`：普通工作区编辑和已识别验证自动批准；未知命令仍询问；
-2. `使用 ACT 执行`：文件 Diff 与命令按 ACT 规则审批；
-3. `继续规划`：保持只读，用户输入反馈后继续同一计划轮次。
+```text
+方案已完成
+批准后将使用 AUTO-ACT 执行。
+
+[执行方案]
+```
+
+若当前执行权限是 ACT，说明改为“批准后将使用 ACT 执行，文件修改和命令需要确认”。用户无需重复选择权限：
+
+- 点击“执行方案”或提交明确的“执行”：按当前执行权限实施；
+- 在 Composer 输入修改意见：保持只读并继续规划；
+- 选择“取消方案”：退出 PLAN，不实施修改。
 
 不实现“清空上下文再执行”。现有两层上下文压缩足以覆盖演示规模，省去 Plan artifact 持久化与上下文重建复杂度。
 
@@ -286,8 +303,8 @@ file_changes[path] = {
 | `file_changed` | 更新本轮累计文件变更 |
 | `final_answer` | 渲染最终 Markdown |
 | `plan_started` | 显示只读计划状态 |
-| `plan_ready` | 显示计划和三个审批动作 |
-| `plan_resolved` | 记录执行模式或继续规划 |
+| `plan_ready` | 显示当前执行权限和“执行方案” |
+| `plan_resolved` | 记录执行、继续规划或取消 |
 | `approval_required` | ACT 文件/命令审批 |
 | `verification` | 更新 `NOT_RUN/FAILED/VERIFIED` |
 | `turn_completed` | 结束当前 UI 轮次 |
@@ -300,14 +317,14 @@ file_changes[path] = {
 
 - 中文/跟随用户语言的输出契约；
 - Agent 控制工具 Schema 与拦截执行；
-- `pre_plan_mode`、plan 状态和等待审批状态；
-- 根据工作方式控制自主进入 PLAN；
+- 持久 `execution_mode`、临时 `plan_state` 和等待审批状态；
+- 根据用户意图自主进入 PLAN；
 - 不向 Web 发布原始 reasoning；Trace 继续记录。
 
 ### `permissions.py`
 
 - 保持 deny 优先；
-- PLAN 作为最高优先级只读覆盖；
+- `plan_state != INACTIVE` 时以 PLAN 作为最高优先级只读覆盖；
 - ACT/AUTO-ACT 继续决定执行阶段副作用权限；
 - 不能因模型调用 `exit_plan_mode` 直接提升权限。
 
@@ -320,15 +337,15 @@ file_changes[path] = {
 
 ### `web/session.py`
 
-- 工作方式、执行权限和模型选择；
+- 执行权限、临时 Plan 状态和模型选择；
 - `WAITING_PLAN_APPROVAL` 状态；
 - Plan 审批/反馈桥接；
 - 快照包含轮次、变更集合、当前选择和待审批信息。
 
 ### `web/app.py`
 
-- 工作方式、权限、模型的受限更新 API；
-- Plan resolve API 支持 auto-act、act 和 revise；
+- 权限与模型的受限更新 API；
+- Plan resolve API 支持 execute、revise 和 cancel；
 - 继续保留 token、Host、Origin 和 CSP 防护。
 
 ### `web/static/`
@@ -346,8 +363,8 @@ file_changes[path] = {
 | 方法与路径 | 行为 |
 |---|---|
 | `GET /api/session` | 返回会话、选择器允许值、变更快照和待审批状态 |
-| `POST /api/prompts` | 同时提交 text、workflow、permission、model |
-| `POST /api/plans/{id}/resolve` | `auto-act / act / revise`；revise 携带反馈 |
+| `POST /api/prompts` | 提交 text、permission、model；pending plan 下的普通文本作为规划反馈 |
+| `POST /api/plans/{id}/resolve` | `execute / revise / cancel`；execute 使用当前权限，revise 携带反馈 |
 | `POST /api/approvals/{id}` | 现有文件/命令审批 |
 | `GET /api/events` | SSE 产品事件与断线重放 |
 
@@ -357,7 +374,7 @@ file_changes[path] = {
 
 - 模型请求进入 PLAN 后重复调用 `enter_plan_mode`：返回幂等成功摘要。
 - 非 PLAN 调用 `exit_plan_mode`：返回结构化 `INVALID_STATE`。
-- 等待 Plan 审批时拒绝新普通 Prompt，只接受 resolve 或 revise。
+- 等待 Plan 审批时，普通 Prompt 作为规划反馈；执行和取消使用 resolve API。
 - 页面刷新时从 session snapshot 恢复待审批计划。
 - 用户拒绝 ACT Diff：不写文件，错误回灌模型并保留对话状态。
 - 累计 Diff 超过 Web 事件限制：快照和事件使用现有截断策略，右侧标明“Diff 已截断”；完整内容留在 Trace/文件系统。
@@ -403,11 +420,11 @@ file_changes[path] = {
 
 ### Python
 
-- Agent 在 AUTO 工作方式下能调用 `enter_plan_mode`；
+- Agent 在 ACT/AUTO-ACT 下都能调用 `enter_plan_mode`；
 - PLAN 中只暴露读取与退出控制工具；
 - `exit_plan_mode` 不自动提升权限；
-- auto-act/act/revise 三种 Plan 结果；
-- 模型/权限/工作方式只能在 IDLE 时改变；
+- execute/revise/cancel 三种 Plan 结果；execute 使用进入 PLAN 前一直保留的当前权限；
+- 模型和执行权限只能在 IDLE 时改变；
 - 同一文件多次编辑得到正确累计 Diff；
 - 新 Prompt 的本轮 Diff 基线正确重置；
 - session snapshot 可恢复变更与待审批计划；
@@ -420,7 +437,7 @@ file_changes[path] = {
 - 文件列表汇总增删行数；
 - 点击文件打开并切换右侧 Diff；
 - 关闭审查恢复单栏；
-- Plan 三个动作请求正确；
+- 执行方案、规划反馈和取消方案请求正确；
 - Composer 选择器在忙碌时禁用；
 - 所有仓库内容通过安全 DOM API 渲染；
 - 刷新重放不会重复最终回答或文件条目。
@@ -429,12 +446,13 @@ file_changes[path] = {
 
 1. 输入中文“先分析失败原因，给我方案，不要修改”，Agent 自动进入 PLAN；
 2. 页面只显示少量中文进展和最终计划；
-3. 点击“使用 AUTO-ACT 执行”；
-4. Agent 修改文件并自动运行 pytest；
-5. 完成后只展开中文最终回答和 `VERIFIED`；
-6. 点击“已编辑 N 个文件”，右侧打开累计 Diff；
-7. 下一轮切换为 ACT，展示写入前 Diff 审批；
-8. 终端和 JSONL Trace 仍保留完整执行证据。
+3. Composer 仍显示 AUTO-ACT，计划卡片说明“批准后将使用 AUTO-ACT 执行”；
+4. 点击“执行方案”；
+5. Agent 修改文件并自动运行 pytest；
+6. 完成后只展开中文最终回答和 `VERIFIED`；
+7. 点击“已编辑 N 个文件”，右侧打开累计 Diff；
+8. 下一轮切换为 ACT，展示写入前 Diff 审批；
+9. 终端和 JSONL Trace 仍保留完整执行证据。
 
 ## 15. 验收标准
 
@@ -442,8 +460,9 @@ file_changes[path] = {
 - 完成轮次默认不展示 reasoning、完整命令输出或内联 Diff。
 - 用户最多两次点击即可从最终答案进入任一文件 Diff。
 - 页面普通说明在中文会话中为中文，允许稳定英文状态和技术原文自然保留。
-- ACT/AUTO-ACT 与模型选择位于 Composer，交互方式接近 Codex。
+- ACT/AUTO-ACT 与模型选择位于 Composer，不出现重复的工作方式选择器。
 - Agent 可自主进入 PLAN，但没有任何路径可绕过用户直接恢复写权限。
+- PLAN 不覆盖用户选择；批准执行后按当前 ACT/AUTO-ACT 继续，不再次询问模式。
 - 右侧展示累计 Diff，而非最后一次局部编辑 Diff。
 - 当前安全边界、批量 argv、read-before-edit、验证状态、SSE 重放和终端输出不回归。
 - 主测试套件和前端行为测试全部通过。
