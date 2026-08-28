@@ -2,7 +2,7 @@
 
 这份文档回答三个问题：MiniCodex 的每个功能解决什么问题、代码在哪里、代码怎样强制执行。建议先读“一个 Prompt 如何跑完”，再按“推荐阅读顺序”打开源码。
 
-> 一句话理解：MiniCodex 是一个单 Agent 状态机。模型只负责决定下一步，Python 代码负责限制路径、执行工具、确认命令、记录证据和终止循环。
+> 一句话理解：MiniCodex 是一个单 Agent 状态机。模型只负责提出下一步，Python 代码负责限制路径、判定权限、执行工具、记录证据和终止循环。
 
 ## 1. 先看全景
 
@@ -16,18 +16,19 @@ minicodex / minicodex-web
 AgentSession.run_turn()
         │  model → tool calls → tool results → model
         │
-        ├── ToolRuntime：六个工具、Diff、验证状态
-        │       └── WorkspaceGuard：所有文件路径必须留在工作区
+        ├── ToolRuntime：六个工具、Diff、批量命令、验证状态
+        │       ├── WorkspaceGuard：所有文件路径必须留在工作区
+        │       └── PermissionPolicy：PLAN / ACT / AUTO-ACT
         ├── SessionTrace：追加 JSONL 审计记录
         └── EventBus：把执行事件推到 Web 页面
                 ├── SSE：服务器单向推送
-                └── ApprovalGate：浏览器确认命令
+                └── ApprovalGate：浏览器确认文件变化或命令
 ```
 
 系统中有两类约束，答辩时要明确区分：
 
 - **Prompt 约束**：告诉模型应该怎么做，例如“先读后改”“修改后运行测试”。模型可能不遵守。
-- **代码约束**：由 Python 直接检查，例如工作区边界、read-before-edit、命令确认。模型无法绕过正常工具接口。
+- **代码约束**：由 Python 直接检查，例如工作区边界、敏感路径、read-before-edit 和权限策略。模型无法绕过正常工具接口。
 
 ## 2. 一个 Prompt 如何跑完
 
@@ -36,12 +37,12 @@ AgentSession.run_turn()
 1. `web_cli.main()` 创建配置、Trace、事件总线、审批门、工具运行时、模型适配器和 `AgentSession`。
 2. 浏览器 `POST /api/prompts`，`WebSession.submit_prompt()` 检查当前是否空闲。
 3. Web Session 启动一个后台 Worker，调用 `AgentSession.run_turn()`。
-4. Agent 把 system message、历史对话、当前 Prompt 和六个 Tool Schema 发给模型。
+4. Agent 把 system message、历史对话、当前 Prompt 和当前模式允许的 Tool Schema 发给模型；PLAN 不暴露修改与命令工具。
 5. 模型返回 `ModelReply`，其中可能有文本和多个 `ToolCall`。
 6. Agent 逐个调用 `ToolRuntime.execute()`。
-7. ToolRuntime 检查参数、工作区路径和 read-before-edit，再执行真实操作。
+7. ToolRuntime 检查整批参数、工作区路径和 read-before-edit，并让 PermissionPolicy 返回 `ALLOW/ASK/DENY` 后再执行真实操作。
 8. 工具无论成功失败都返回统一 `ToolResult`，Agent 用原始 `tool_call_id` 回灌模型。
-9. 修改工具返回 unified diff；命令工具返回 argv、stdout、stderr 和 exit code。
+9. 修改工具在写入前生成 unified diff；命令工具逐条返回 argv、权限结论、stdout、stderr、exit code 和状态。
 10. 如果修改后没有验证，Agent 最多追加一次验证提醒，再让模型决定是否运行测试。
 11. 模型不再调用工具时，本轮以 `COMPLETED` 结束；也可能因轮数、重复失败、中断或模型错误结束。
 12. 最终文本、终止原因、轮数和验证状态写入 JSONL，并通过 SSE 推到浏览器。
@@ -55,6 +56,7 @@ WebSession.submit_prompt
     ├── OpenAIChatModel.complete
     ├── ToolRuntime.execute
     │   ├── WorkspaceGuard.resolve
+    │   ├── PermissionPolicy.decide_*
     │   └── list/search/read/write/edit/run_command
     ├── serialize_tool_result
     └── AgentSession._outcome
@@ -100,7 +102,7 @@ def _changed(self, target: Path) -> None:
 
 `ToolRuntime.run_command()` 只有在以下条件同时成立时才更新验证状态：
 
-1. 命令已经得到用户批准；
+1. 命令已经通过权限策略（自动允许或用户批准）；
 2. `purpose` 是 `test`、`build` 或 `lint`；
 3. 当前会话至少成功修改过一次文件。
 
@@ -167,9 +169,9 @@ Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新�
 
 准确表述是：
 
-> 当前文件修改序号执行过一条由 Agent 标记为 test/build/lint、经用户批准且退出码为 0 的命令。
+> 当前文件修改序号执行过一条由 Agent 标记为 test/build/lint、通过权限策略且退出码为 0 的命令。
 
-它不代表代码被形式化证明正确。当前初版信任模型填写的 `purpose`，还没有分析 argv 是否真的是有覆盖价值的测试。未来可以加入验证命令白名单、测试发现、覆盖率门槛或项目级验证策略。
+它不代表代码被形式化证明正确。AUTO-ACT 会识别 pytest/npm/cargo/go 等常见验证 argv，未知命令仍需人工确认；但 ACT 中获批的命令仍信任模型填写的 `purpose`，也没有衡量测试覆盖价值。未来可加入项目级验证配置、测试发现和覆盖率门槛。
 
 对应测试：
 
@@ -184,11 +186,13 @@ Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新�
 | OpenAI-compatible Tool Calling | `model_adapter.py::complete` | 解析函数名、call ID 和 JSON 对象参数 | 非瞬时错误上抛给 Agent |
 | 六个核心工具 | `tools.py::TOOL_SCHEMAS/ToolRuntime` | 只允许 Schema 中注册的工具 | `UNKNOWN_TOOL` |
 | Workspace Boundary | `workspace.py::WorkspaceGuard.resolve` | resolve 后必须是 root 的子路径 | `WORKSPACE_VIOLATION` |
+| 三种权限模式 | `permissions.py::PermissionPolicy` | 每个文件变化/命令返回 ALLOW、ASK 或 DENY | 拒绝或进入审批 |
+| 敏感路径保护 | `permissions.py::is_protected_path` | `.env`、Key、`.git`、Trace 不可枚举/读写 | `PROTECTED_PATH` |
 | Read-before-edit | `tools.py::_require_read` | 已存在文件必须在 `read_paths` | `READ_REQUIRED` |
 | 唯一匹配编辑 | `tools.py::edit_file` | `old_text` 必须恰好出现一次 | `OLD_TEXT_NOT_FOUND` / `AMBIGUOUS_MATCH` |
 | Unified Diff | `write_file/edit_file` | 修改成功后用 `difflib.unified_diff` 计算 | 随 ToolResult 回传 |
-| argv 安全执行 | `tools.py::run_command` | `list[str]`、`shell=False`、固定 cwd | 参数错误返回 ToolResult |
-| 人工命令确认 | `cli.confirm_command` / `web.ApprovalGate` | approver 返回 True 才启动进程 | 默认拒绝、超时拒绝 |
+| argv 批量执行 | `tools.py::run_command` | 整批先校验；每步 `list[str]`、`shell=False`、固定 cwd | 可失败即停止 |
+| 通用副作用确认 | `cli.confirm_action` / `web.ApprovalGate` | ACT 审 Diff/命令；AUTO-ACT 只询问未知风险 | 默认拒绝、超时拒绝 |
 | 统一错误回灌 | `models.py::ToolResult`、`tools.py::execute` | 普通工具异常转换成结构化失败 | Agent 继续下一轮 |
 | 最大轮数 | `AgentSession.max_turns_per_prompt` | while 条件，默认每 Prompt 20 | `MAX_TURNS` |
 | 重复失败检测 | `agent.py::run_turn` | 同名同参连续失败 3 次 | `REPEATED_CALL` |
@@ -200,7 +204,8 @@ Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新�
 | Mock Model 测试 | `tests/test_agent.py::MockModel` | 固定 ModelReply 序列，无真实 API | 可重复测试状态机 |
 | 连续会话 | `AgentSession.messages` + `WebSession` | 同一对象跨 Prompt 保留消息和工具状态 | 并发 Prompt 返回 409 |
 | SSE 事件流 | `web/events.py` + `web/app.py` | 单调事件 ID、重放、heartbeat | 浏览器自动重连 |
-| Web 命令审批 | `web/approval.py` | Condition 等待最多 300 秒 | 拒绝、超时或关闭均返回 False |
+| PLAN→执行 | `agent.py` + `web/session.py` | 同一 Session 切模式并追加实施 Prompt | 非空闲或非法迁移返回冲突 |
+| Web 通用审批 | `web/approval.py` | Condition 等待最多 300 秒 | 拒绝、超时或关闭均返回 False |
 | 本机 Web 安全 | `web/app.py`、`web_cli.py` | 127.0.0.1、随机 token、Host/Origin/CSP | HTTP 401/400/403 |
 | 安全 Markdown | `web/static/markdown.js` | DOM API 与 textContent，不用 innerHTML | 非法实体保留为文本 |
 | 轮次折叠 UI | `web/static/app.js` | 当前轮展开，完成后过程折叠 | 历史仍可点击查看 |
@@ -213,14 +218,14 @@ Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新�
 
 - 输入：`path`，默认 `.`。
 - 先经过 WorkspaceGuard。
-- 递归列出文件，跳过 `.git`、`.minicodex`、`.pytest_cache`。
+- 递归列出文件，跳过 `.git`、`.minicodex`、`.pytest_cache` 和 PermissionPolicy 判定的敏感路径。
 - 每个候选路径再次 resolve，防止枚举过程中遇到逃逸符号链接。
 - 返回相对工作区的 POSIX 风格路径。
 
 ### 5.2 `search_text`
 
 - 输入：非空 `query` 和可选 `path`。
-- 只读取 UTF-8 文本；二进制、非 UTF-8 或不可读文件直接跳过。
+- 只读取非敏感 UTF-8 文本；二进制、非 UTF-8、不可读文件或 `.env`/私钥直接跳过。
 - 返回路径、行号和整行文本。
 - 当前是朴素 Python 逐文件搜索，适合小型演示项目，不是大型代码索引。
 
@@ -235,7 +240,8 @@ Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新�
 - 新文件可以直接创建。
 - 已存在文件必须先 `read_file`。
 - 内容完全相同返回 `NO_CHANGE`。
-- 成功后创建父目录、写 UTF-8、生成 Diff、增加 `change_seq`。
+- 写入前生成 Diff 并经过模式策略：PLAN 拒绝，ACT 询问，AUTO-ACT 对普通路径允许。
+- 获准后创建父目录、写 UTF-8、增加 `change_seq`。
 - 它可以整体覆盖文件，因此模型应优先使用更小的 `edit_file`。
 
 ### 5.5 `edit_file`
@@ -243,20 +249,19 @@ Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新�
 - 已存在文件必须先读。
 - 统计 `old_text` 出现次数：0 次拒绝，多于 1 次也拒绝。
 - 恰好一次才执行 literal replace，不使用正则表达式。
-- 成功后返回统一 Diff，并让旧验证失效。
+- 唯一替换后先生成 Diff 并审批，获准才落盘；成功后返回 Diff，并让旧验证失效。
 
 ### 5.6 `run_command`
 
-- `argv` 必须是非空字符串数组。
-- `purpose` 只能是 `test/build/lint/other`。
-- timeout 必须是 1–120 秒，默认 30 秒。
-- 必须先调用 `command_approver`。
-- 使用 `subprocess.run(argv, cwd=workspace, shell=False, ...)`。
-- stdout/stderr 都被捕获，失败诊断会回灌模型。
-- 当前只移除子进程环境中的 `MINICODEX_API_KEY`、`OPENAI_API_KEY` 和 `ANTHROPIC_API_KEY`。**`DASHSCOPE_API_KEY` 尚未移除，是当前需要补强的密钥隔离边界。**
+- `commands` 必须包含 1–8 个对象；整批先校验，避免前一步已产生副作用后才发现后一步参数非法。
+- 每步 `argv` 必须是非空字符串数组，`purpose` 只能是 `test/build/lint/other`，timeout 为 1–120 秒。
+- 每一步独立经过 PermissionPolicy；PLAN 拒绝，ACT 询问，AUTO-ACT 自动允许识别出的验证/只读 Git 命令，未知命令询问，高风险命令拒绝。
+- 逐条使用 `subprocess.run(argv, cwd=workspace, shell=False, ...)`。
+- 每一步的 stdout/stderr/exit code/status 都被捕获；`stop_on_failure=true` 时失败后的命令标记为 skipped。
+- 子进程环境移除 `MINICODEX_API_KEY`、`DASHSCOPE_API_KEY`、`OPENAI_API_KEY` 和 `ANTHROPIC_API_KEY`。
 - 当前超时只终止直接子进程，未使用 Windows Job Object 管理完整进程树。
 
-## 6. 安全机制逐个看
+## 6. 安全机制与权限模式逐个看
 
 ### 6.1 Workspace Boundary
 
@@ -281,7 +286,13 @@ Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新�
 模型提交的是：
 
 ```json
-{"argv":["python","-m","pytest","-q"],"purpose":"test"}
+{
+  "commands": [
+    {"argv":["python","-m","pytest","-q"],"purpose":"test"},
+    {"argv":["python","expense_tracker.py"],"purpose":"other"}
+  ],
+  "stop_on_failure": true
+}
 ```
 
 不是：
@@ -290,9 +301,23 @@ Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新�
 python -m pytest -q && dangerous-command
 ```
 
-因为没有 shell 解析，`;`、`&&`、重定向和命令替换不会自动获得特殊语义。但用户仍需检查 argv，因为被批准的可执行文件本身可以做任意工作区内外操作；当前权限模式不是 OS 沙箱。
+因为没有 shell 解析，`;`、`&&`、重定向和命令替换不会自动获得特殊语义。批量语义由 Python 循环实现，所以仍能一次 Tool Call 完成“测试成功后再冒烟”。但用户仍需检查未知 argv，因为获准的可执行文件本身可以做任意工作区内外操作；当前权限模式不是 OS 沙箱。
 
-### 6.5 统一 ToolResult
+### 6.5 `PLAN / ACT / AUTO-ACT`
+
+[`permissions.py`](src/minicodex/permissions.py) 把模式与风险判断集中到 `PermissionPolicy`，而不是散落在 Prompt 或 UI：
+
+| 模式 | 文件变化 | 命令 |
+|---|---|---|
+| PLAN | 拒绝；模型也看不到 write/edit/run schema | 全部拒绝 |
+| ACT | 先把 Diff 交给 approver | 每一步把 argv 交给 approver |
+| AUTO-ACT | 普通工作区文件允许，敏感路径拒绝 | 验证/只读 Git 允许，未知询问，危险操作拒绝 |
+
+敏感路径规则同时用于直接读写和递归枚举，避免模型通过 `list_files` 或 `search_text` 间接看到 `.env`。`.env.example` 只作为公开配置模板例外。危险命令的显式 deny 优先于模式便利性。
+
+AUTO-ACT 的安全含义是“应用层替用户批准规则明确的操作”，不是系统账户降权。它没有容器、seccomp、Windows Job Object 或文件系统虚拟化。
+
+### 6.6 统一 ToolResult
 
 [`models.py`](src/minicodex/models.py) 的 `ToolResult` 同时承载成功和失败：
 
@@ -308,7 +333,7 @@ ok / tool / call_id / summary / data / error / meta
 
 ### 7.1 `SYSTEM_PROMPT`
 
-只放高层行为约束，不承担安全判定。真正安全边界在 ToolRuntime 和 WorkspaceGuard。
+只放高层行为约束，不承担安全判定。PLAN 会追加只读提示，并且 `_tool_schemas()` 只返回 list/search/read；真正安全边界仍在 ToolRuntime、WorkspaceGuard 和 PermissionPolicy，即使模型伪造调用也会被拒绝。
 
 ### 7.2 `Model` Protocol、`ToolCall`、`ModelReply`
 
@@ -327,6 +352,7 @@ complete(messages, tools) -> ModelReply
 - `messages`：system message 加所有历史对话；
 - `tools`：其中包含 read 集合、修改序号和验证证据；
 - `prompt_count`：连续会话的用户轮次；
+- `mode`：与 ToolRuntime 同步的当前权限模式；
 - Trace、终端回调和 Web 事件回调。
 
 ### 7.4 `run_turn()`
@@ -433,7 +459,7 @@ extra_body={"enable_thinking": True, "preserve_thinking": False}
 minicodex = "minicodex.cli:main"
 ```
 
-[`cli.py`](src/minicodex/cli.py) 负责参数校验、创建依赖、终端 `y/N` 审批、打印 ToolResult 和根据 StopReason 返回进程退出码。`Agent` 只是 `AgentSession` 的单次运行兼容包装。
+[`cli.py`](src/minicodex/cli.py) 负责 `--mode` 参数、创建依赖、终端通用 `y/N` 审批、打印批量 ToolResult 和根据 StopReason 返回进程退出码。文件审批显示待应用 Diff，命令审批显示当前批次中的单步 argv。`Agent` 只是 `AgentSession` 的单次运行兼容包装。
 
 ### 11.2 Web 入口
 
@@ -445,7 +471,7 @@ minicodex-web = "minicodex.web_cli:main"
 
 ```text
 EventBus
-ApprovalGate
+ApprovalGate（文件变化和命令）
 ToolRuntime
 OpenAIChatModel
 AgentSession
@@ -465,6 +491,7 @@ FastAPI app
 - 每个 Prompt 使用一个后台线程；
 - 线程执行完成后回到 `IDLE`；
 - 同一个 `AgentSession`、messages、ToolRuntime 和 Workspace 一直复用。
+- 只允许在 IDLE 时切换模式；PLAN 结果可以在同一 Session 中批准到 ACT 或 AUTO-ACT 执行。
 
 所以“多轮”不是多个 Agent，而是同一个 Agent Session 连续接收多个用户指令。
 
@@ -486,7 +513,7 @@ SSE 只负责服务器到浏览器；Prompt 和审批决定仍用 HTTP POST。15
 
 ### 12.4 `ApprovalGate`
 
-[`web/approval.py`](src/minicodex/web/approval.py) 把同步 `run_command()` 需要的 bool 回调桥接为异步页面操作：
+[`web/approval.py`](src/minicodex/web/approval.py) 把 ToolRuntime 同步需要的通用 bool 回调桥接为异步页面操作：
 
 1. 创建唯一 request ID；
 2. 发布 `approval_required`；
@@ -495,7 +522,7 @@ SSE 只负责服务器到浏览器；Prompt 和审批决定仍用 HTTP POST。15
 5. `resolve()` 唤醒 Worker；
 6. 300 秒超时默认拒绝。
 
-任一时刻只允许一个 pending approval。
+`ApprovalPrompt.kind` 区分 `command` 和 `file_change`；payload 同时带 summary、reason、risk、rule ID，文件变化还带 diff，命令带 argv/purpose。任一时刻只允许一个 pending approval。
 
 ### 12.5 本机 HTTP 防护
 
@@ -519,14 +546,14 @@ FastAPI 中间件要求：
 
 `app.js` 的阅读顺序：
 
-1. `setStatus()`：控制输入框是否可用；
+1. `setStatus()/setModeUI()`：控制输入框、当前模式和 PLAN 只读状态；
 2. `beginTurn()`：新 Prompt 创建轮次组并折叠上一轮；
 3. `addCard()/addCompactLine()`：渲染 Diff、命令、错误和简洁工具行；
 4. `completeTurn()`：折叠执行过程，只展开最终 Markdown；
 5. `handlers`：把 `model_reasoning` 渲染为 `THINKING · TURN N`，并映射其他 SSE 事件；
-6. `loadSnapshot()`：刷新时恢复状态和 pending approval；
+6. `loadSnapshot()`：刷新时恢复模式、状态和 pending approval；
 7. `connectEvents()`：建立 SSE；
-8. `submitPrompt()/decideApproval()`：浏览器到服务器的两个 POST 方向。
+8. `submitPrompt()/decideApproval()/changeMode()/approvePlan()`：浏览器到服务器的 POST 方向。
 
 Markdown 渲染只用 `createElement`、`createTextNode`、`textContent` 和 `replaceChildren`，不把模型输出交给 `innerHTML`。因此 `<script>` 只会显示成文本。
 
@@ -554,13 +581,14 @@ Markdown 渲染只用 `createElement`、`createTextNode`、`textContent` 和 `re
 |---|---|
 | `test_core.py` | 配置、ToolResult、WorkspaceGuard、Trace |
 | `test_tools.py` | 六工具、边界逃逸、read-before-edit、唯一匹配、命令确认、FAILED 证据 |
+| `test_permissions.py` | PLAN/ACT/AUTO-ACT、敏感路径、验证命令和危险命令分类 |
 | `test_agent.py` | Mock Model Loop、错误回灌、VERIFIED、reasoning 事件与 Trace、终止条件、连续会话 |
 | `test_model_adapter.py` | Tool Call 与 reasoning 解析、Qwen thinking/preserve 参数、瞬时错误重试 |
 | `test_cli.py` | 参数校验、Ctrl+C、退出码和有限长 thinking 输出 |
 | `test_web_events.py` | 事件 ID、保留窗口、订阅和重放 |
 | `test_web_approval.py` | allow/reject/timeout/close |
-| `test_web_session.py` | 单 Worker、连续 Prompt、状态快照 |
-| `test_web_api.py` | token、Host、Origin、Prompt 和 SSE API |
+| `test_web_session.py` | 单 Worker、连续 Prompt、模式切换、PLAN→执行和状态快照 |
+| `test_web_api.py` | token、Host、Origin、Prompt、模式、计划批准和 SSE API |
 | `test_web_static.py` | 静态资源与禁止 innerHTML |
 | `test_frontend_timeline.py` | 当前轮 thinking、历史折叠、最终答案隔离、最终 TURN、刷新重建 |
 | `test_markdown_renderer.py` | Markdown、安全文本和异常输入不死循环 |
@@ -573,15 +601,16 @@ Mock Model 的核心思想是预先给出固定 `ModelReply` 列表：第一次�
 
 1. [`models.py`](src/minicodex/models.py)：先认识数据结构。
 2. [`workspace.py`](src/minicodex/workspace.py)：理解硬边界。
-3. [`tools.py`](src/minicodex/tools.py)：看六工具和 VERIFIED。
-4. [`agent.py`](src/minicodex/agent.py)：看状态机怎样调用工具。
-5. [`model_adapter.py`](src/minicodex/model_adapter.py)：看模型协议怎样接入。
-6. [`context.py`](src/minicodex/context.py)：看上下文为什么不会无限增长。
-7. [`session.py`](src/minicodex/session.py)：看审计记录。
-8. [`cli.py`](src/minicodex/cli.py)：看单轮组装。
-9. `web/events.py` → `web/approval.py` → `web/session.py` → `web/app.py`：看 Web 编排。
-10. `web/static/app.js`：最后看展示层如何消费事件。
-11. 对照 `tests/`，确认每项约束是否真的由测试保护。
+3. [`permissions.py`](src/minicodex/permissions.py)：看三种模式如何输出 allow/ask/deny。
+4. [`tools.py`](src/minicodex/tools.py)：看六工具、批量 argv 和 VERIFIED。
+5. [`agent.py`](src/minicodex/agent.py)：看状态机怎样按模式暴露和调用工具。
+6. [`model_adapter.py`](src/minicodex/model_adapter.py)：看模型协议怎样接入。
+7. [`context.py`](src/minicodex/context.py)：看上下文为什么不会无限增长。
+8. [`session.py`](src/minicodex/session.py)：看审计记录。
+9. [`cli.py`](src/minicodex/cli.py)：看单轮组装。
+10. `web/events.py` → `web/approval.py` → `web/session.py` → `web/app.py`：看 Web 编排。
+11. `web/static/app.js`：最后看展示层如何消费事件。
+12. 对照 `tests/`，确认每项约束是否真的由测试保护。
 
 ## 17. 老师可能追问
 
@@ -595,7 +624,11 @@ Prompt 适合表达策略，代码适合强制安全边界。只写 Prompt 无�
 
 ### 为什么不用 shell 命令字符串？
 
-argv 加 `shell=False` 消除 shell 元字符解析，行为更可预测，也更容易在执行前展示和审批。
+argv 加 `shell=False` 消除 shell 元字符解析，行为更可预测，也更容易逐条展示和审批。需要 `&&` 式工作流时由 `commands[] + stop_on_failure` 表达，不需要引入 shell parser。
+
+### AUTO-ACT 是否等于“完全信任”？
+
+不是。普通工作区编辑与规则明确的验证/只读命令自动允许，未知操作仍询问，显式危险操作和敏感路径仍拒绝。它也不是 OS 沙箱，获准程序仍继承当前系统用户权限。
 
 ### Read-before-edit 是否防止并发覆盖？
 
@@ -615,16 +648,16 @@ argv 加 `shell=False` 消除 shell 元字符解析，行为更可预测，也�
 
 ### 当前最值得优先补的安全点是什么？
 
-1. 从命令子进程环境中同时移除 `DASHSCOPE_API_KEY`；
-2. 用 SHA-256/mtime 保护 read-before-edit 的内容版本；
-3. 用 Windows Job Object 或进程组终止完整命令树；
-4. 对验证命令建立项目级策略，而不是完全信任 purpose。
+1. 用 SHA-256/mtime 保护 read-before-edit 的内容版本；
+2. 用 Windows Job Object 或进程组终止完整命令树；
+3. 把 AUTO-ACT 规则变成可审计的项目级配置；
+4. 为获准子进程增加真正的系统级隔离或低权限账户。
 
 ## 18. 用一句话向老师总结每层
 
 - **模型层**：OpenAI-compatible 模型负责规划下一步。
 - **Agent 层**：单循环负责消息、Tool Calls、终止和验证提醒。
 - **工具层**：六工具把模型意图变成确定操作和结构化结果。
-- **安全层**：Workspace、先读后改、唯一匹配、argv 和人工审批限制副作用。
+- **安全层**：Workspace、敏感路径、先读后改、唯一匹配、三模式策略和 argv 限制副作用。
 - **证据层**：Diff、stdout/stderr、change_seq、VERIFIED 和 JSONL 让结果可追踪。
 - **Web 层**：同一 Session 通过 SSE 实时展示，并用 HTTP 完成 Prompt 和审批。

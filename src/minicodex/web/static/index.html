@@ -4,13 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniCodex · Local Agent Console</title>
-  <link rel="stylesheet" href="/static/app.css?v=reasoning-1">
+  <link rel="stylesheet" href="/static/app.css?v=permissions-1">
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="brand-mark">MC</span><div><strong>MiniCodex</strong><span>LOCAL AGENT CONSOLE</span></div></div>
     <dl class="session-facts">
       <div><dt>STATUS</dt><dd id="session-status" class="status-pill">CONNECTING</dd></div>
+      <div><dt>MODE</dt><dd><select id="mode-select" aria-label="Agent 权限模式"><option value="plan">PLAN · READ ONLY</option><option value="act" selected>ACT · REVIEW</option><option value="auto-act">AUTO-ACT · AUTONOMOUS</option></select></dd></div>
       <div><dt>MODEL</dt><dd id="model-name">—</dd></div>
       <div><dt>VERIFIED</dt><dd id="verification-status">NOT_RUN</dd></div>
     </dl>
@@ -30,9 +31,9 @@
     <div class="composer-actions"><span>Enter 发送 · Shift+Enter 换行</span><button id="send-button" type="submit">运行任务 →</button></div>
   </form>
   <dialog id="approval-dialog" class="approval-dialog">
-    <form method="dialog"><span class="eyebrow warning">COMMAND APPROVAL</span><h2>允许 Agent 执行命令？</h2><p id="approval-purpose"></p><pre><code id="approval-command"></code></pre><p id="approval-timeout" class="muted"></p><div class="approval-actions"><button id="reject-command" type="button" class="secondary">拒绝</button><button id="allow-command" type="button">允许执行</button></div></form>
+    <form method="dialog"><span class="eyebrow warning">SIDE EFFECT REVIEW</span><h2 id="approval-title">允许 Agent 执行此操作？</h2><p id="approval-purpose"></p><pre><code id="approval-command"></code></pre><p id="approval-timeout" class="muted"></p><div class="approval-actions"><button id="reject-command" type="button" class="secondary">拒绝</button><button id="allow-command" type="button">允许一次</button></div></form>
   </dialog>
   <script src="/static/markdown.js?v=markdown-1" defer></script>
-  <script src="/static/app.js?v=reasoning-1" defer></script>
+  <script src="/static/app.js?v=permissions-1" defer></script>
 </body>
 </html>

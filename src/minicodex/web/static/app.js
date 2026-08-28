@@ -6,7 +6,9 @@ const promptInput = $("#prompt-input");
 const sendButton = $("#send-button");
 const statusNode = $("#session-status");
 const approvalDialog = $("#approval-dialog");
+const modeSelect = $("#mode-select");
 let pendingApprovalId = null;
+let currentMode = "act";
 let latestEventId = 0;
 let currentTurn = null;
 const MAX_TIMELINE_CARDS = 500;
@@ -19,6 +21,7 @@ function setStatus(value) {
   const busy = value !== "IDLE";
   promptInput.disabled = busy;
   sendButton.disabled = busy;
+  modeSelect.disabled = busy;
 }
 
 function removeEmptyState() {
@@ -101,7 +104,32 @@ function completeTurn(data) {
   currentTurn.process.open = false;
   currentTurn.title.textContent = `PROMPT ${currentTurn.promptIndex} · COMPLETED · FINAL TURN ${data.turns || "—"}`;
   addCard("turn_completed", `AGENT · FINAL · TURN ${data.turns || "—"}`, data.text || "任务结束", "markdown", currentTurn.final, false);
+  if (currentMode === "plan") addPlanActions(currentTurn.final);
   currentTurn.root.scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+function setModeUI(mode) {
+  currentMode = mode || "act";
+  modeSelect.value = currentMode;
+  modeSelect.dataset.mode = currentMode;
+}
+
+function addPlanActions(target) {
+  const actions = document.createElement("section");
+  actions.className = "plan-actions";
+  const note = document.createElement("p");
+  note.textContent = "方案已生成。选择审查每个副作用，或授权本会话在工作区内自主实施。";
+  const act = document.createElement("button");
+  act.type = "button";
+  act.className = "secondary";
+  act.textContent = "在 ACT 中实施";
+  act.addEventListener("click", () => approvePlan("act").catch(reportError));
+  const auto = document.createElement("button");
+  auto.type = "button";
+  auto.textContent = "在 AUTO-ACT 中实施 →";
+  auto.addEventListener("click", () => approvePlan("auto-act").catch(reportError));
+  actions.append(note, act, auto);
+  target.append(actions);
 }
 
 function addCard(kind, title, body, mode = "text", target = null, countProcess = true) {
@@ -163,14 +191,17 @@ function commandOutput(data) {
 function showApproval(data) {
   pendingApprovalId = data.request_id;
   setStatus("WAITING_APPROVAL");
-  $("#approval-purpose").textContent = data.purpose || "Agent 请求执行命令";
-  $("#approval-command").textContent = JSON.stringify(data.argv || [], null, 2);
-  $("#approval-timeout").textContent = `命令上限 ${data.timeout_sec}s · 审批等待 ${data.approval_timeout_sec}s`;
+  const details = data.details || {};
+  $("#approval-title").textContent = data.kind === "file_change" ? "允许 Agent 写入这个 Diff？" : "允许 Agent 执行这个命令？";
+  $("#approval-purpose").textContent = `${data.summary || "Agent 请求执行操作"} · ${String(data.risk || "medium").toUpperCase()} · ${data.reason || "需要用户审批"}`;
+  $("#approval-command").textContent = data.kind === "file_change" ? String(details.diff || "") : JSON.stringify(details.argv || [], null, 2);
+  $("#approval-timeout").textContent = data.kind === "file_change" ? `路径 ${details.path || "—"} · 审批等待 ${data.approval_timeout_sec}s` : `第 ${Number(details.index || 0) + 1}/${details.count || 1} 步 · 命令上限 ${details.timeout_sec || 30}s · 审批等待 ${data.approval_timeout_sec}s`;
   if (!approvalDialog.open) approvalDialog.showModal();
 }
 
 const handlers = {
-  session_started(data) { $("#workspace-path").textContent = data.workspace || "—"; $("#model-name").textContent = data.model || "—"; },
+  session_started(data) { $("#workspace-path").textContent = data.workspace || "—"; $("#model-name").textContent = data.model || "—"; if (data.mode) setModeUI(data.mode); },
+  mode_changed(data) { setModeUI(data.to); addCompactLine("mode_changed", `[mode] ${data.from || "—"} → ${data.to || "—"}`); },
   status(data) { setStatus(data.value); },
   user_prompt(data) { beginTurn(data); },
   model_reasoning(data) { if (data.content) addCard("model_reasoning", `THINKING · TURN ${data.turn || "—"}`, data.content, "summary"); },
@@ -200,6 +231,7 @@ async function loadSnapshot() {
   $("#workspace-path").textContent = data.workspace;
   $("#model-name").textContent = data.model;
   $("#verification-status").textContent = data.verification_status;
+  setModeUI(data.mode || "act");
   setStatus(data.status);
   if (data.pending_approval) {
     showApproval(data.pending_approval);
@@ -244,10 +276,24 @@ async function decideApproval(allow) {
   $("#reject-command").disabled = false;
 }
 
+async function changeMode(mode) {
+  const previous = currentMode;
+  const response = await fetch(withToken("/api/mode"), {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({mode})});
+  if (!response.ok) { setModeUI(previous); addCard("error", "MODE CHANGE FAILED", await response.text(), "code"); return; }
+  setModeUI((await response.json()).mode);
+}
+
+async function approvePlan(mode) {
+  setStatus("RUNNING");
+  const response = await fetch(withToken("/api/plans/approve"), {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({mode})});
+  if (!response.ok) { addCard("error", "PLAN APPROVAL FAILED", await response.text(), "code"); await loadSnapshot(); }
+}
+
 function reportError(error) { setStatus("ERROR"); addCard("error", "CONNECTION ERROR", error.message || String(error), "code"); }
 $("#prompt-form").addEventListener("submit", (event) => { event.preventDefault(); submitPrompt().catch(reportError); });
 promptInput.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitPrompt().catch(reportError); } });
 $("#allow-command").addEventListener("click", () => decideApproval(true).catch(reportError));
 $("#reject-command").addEventListener("click", () => decideApproval(false).catch(reportError));
+modeSelect.addEventListener("change", () => changeMode(modeSelect.value).catch(reportError));
 approvalDialog.addEventListener("cancel", (event) => { event.preventDefault(); decideApproval(false).catch(reportError); });
 loadSnapshot().then(() => connectEvents(0)).catch(reportError);

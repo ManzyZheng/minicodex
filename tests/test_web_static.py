@@ -32,6 +32,8 @@ def test_root_serves_the_web_console_and_assets() -> None:
     assert 'id="timeline"' in page.text
     assert 'id="prompt-input"' in page.text
     assert 'id="approval-dialog"' in page.text
+    assert 'id="mode-select"' in page.text
+    assert 'id="approval-title"' in page.text
     assert stylesheet.status_code == 200
     assert "--color-ink" in stylesheet.text
     assert markdown.status_code == 200

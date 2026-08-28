@@ -1,6 +1,7 @@
 import minicodex.cli as cli
 from minicodex.cli import build_parser, main
 from minicodex.models import ModelReply
+from minicodex.permissions import AgentMode, ApprovalPrompt
 
 
 def test_cli_exposes_workspace_model_and_turn_limit_but_not_api_key() -> None:
@@ -9,6 +10,7 @@ def test_cli_exposes_workspace_model_and_turn_limit_but_not_api_key() -> None:
     assert "--workspace" in help_text
     assert "--model" in help_text
     assert "--max-turns" in help_text
+    assert "--mode" in help_text
     assert "--api-key" not in help_text
 
 
@@ -42,3 +44,20 @@ def test_terminal_cli_wires_model_reasoning_to_output(tmp_path, monkeypatch, cap
     output = capsys.readouterr().out
     assert "[thinking:turn 1]" in output
     assert "inspect before answering" in output
+
+
+def test_cli_mode_defaults_to_act_and_accepts_auto_act() -> None:
+    assert build_parser().parse_args([]).mode == AgentMode.ACT.value
+    assert build_parser().parse_args(["--mode", "auto-act"]).mode == AgentMode.AUTO_ACT.value
+
+
+def test_cli_file_approval_prints_diff_before_decision(monkeypatch, capsys) -> None:
+    prompt = ApprovalPrompt(
+        kind="file_change", tool="edit_file", summary="edit app.py", reason="ACT requires review",
+        risk="medium", rule_id="act.file_change", details={"path": "app.py", "diff": "-old\n+new\n"},
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    assert cli.confirm_action(prompt) is False
+    output = capsys.readouterr().out
+    assert "app.py" in output
+    assert "-old" in output and "+new" in output

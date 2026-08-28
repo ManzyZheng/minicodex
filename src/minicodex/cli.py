@@ -9,6 +9,7 @@ from .agent import Agent, StopReason
 from .config import Config, ConfigError
 from .context import truncate_text
 from .models import ToolResult
+from .permissions import AgentMode, ApprovalPrompt
 from .model_adapter import OpenAIChatModel
 from .session import SessionTrace
 from .tools import ToolRuntime
@@ -20,14 +21,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", default=".", help="project directory (default: current directory)")
     parser.add_argument("--model", help="model name; otherwise MINICODEX_MODEL")
     parser.add_argument("--max-turns", type=int, default=20, help="maximum model turns (default: 20)")
+    parser.add_argument("--mode", choices=[mode.value for mode in AgentMode], default=AgentMode.ACT.value, help="permission mode: plan, act, or auto-act")
     return parser
 
 
-def confirm_command(argv: list[str], purpose: str, timeout_sec: int) -> bool:
-    print("\n[permission] The agent wants to run this argv command:")
-    print(f"  purpose: {purpose}" + (" (success will verify current changes)" if purpose in {"test", "build", "lint"} else ""))
-    print(f"  timeout: {timeout_sec}s")
-    print("  " + repr(argv))
+def confirm_action(prompt: ApprovalPrompt) -> bool:
+    print(f"\n[permission] {prompt.summary}")
+    print(f"  risk: {prompt.risk}")
+    print(f"  reason: {prompt.reason}")
+    if prompt.kind == "command":
+        print(f"  purpose: {prompt.details.get('purpose')}")
+        print(f"  timeout: {prompt.details.get('timeout_sec')}s")
+        print("  " + repr(prompt.details.get("argv", [])))
+    else:
+        print(f"  path: {prompt.details.get('path')}")
+        print(str(prompt.details.get("diff", "")).rstrip())
     try:
         answer = input("Allow? [y/N] ").strip().lower()
     except EOFError:
@@ -43,7 +51,10 @@ def print_tool_result(result: ToolResult) -> None:
     if isinstance(result.data, dict):
         detail = result.data.get("diff")
         if not detail and result.tool == "run_command":
-            detail = (result.data.get("stdout") or "") + (result.data.get("stderr") or "")
+            detail = "\n".join(
+                f"[{step.get('index')}] {step.get('status')} {step.get('argv')}\n{step.get('stdout', '')}{step.get('stderr', '')}"
+                for step in result.data.get("commands", [])
+            )
         if detail:
             visible, _ = truncate_text(str(detail), limit=8_000)
             print(visible.rstrip())
@@ -88,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     trace_path = workspace / ".minicodex" / "sessions" / f"{stamp}.jsonl"
     try:
         trace = SessionTrace(trace_path, workspace=workspace)
-        runtime = ToolRuntime(workspace, command_approver=confirm_command)
+        runtime = ToolRuntime(workspace, approver=confirm_action, mode=AgentMode(args.mode))
         model = OpenAIChatModel.from_config(config)
     except KeyboardInterrupt:
         print("\nInterrupted by user.", file=sys.stderr)

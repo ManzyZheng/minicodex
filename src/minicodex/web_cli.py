@@ -12,6 +12,7 @@ from .agent import AgentSession
 from .cli import print_agent_event, print_tool_result
 from .config import Config, ConfigError
 from .model_adapter import OpenAIChatModel
+from .permissions import AgentMode
 from .session import SessionTrace
 from .tools import ToolRuntime
 from .web.app import create_app
@@ -26,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="model name; otherwise MINICODEX_MODEL")
     parser.add_argument("--max-turns", type=int, default=20, help="maximum model turns per prompt (default: 20)")
     parser.add_argument("--port", type=int, default=8000, help="loopback port (default: 8000)")
+    parser.add_argument("--mode", choices=[mode.value for mode in AgentMode], default=AgentMode.ACT.value, help="initial permission mode")
     return parser
 
 
@@ -61,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         trace = SessionTrace(trace_path, workspace=workspace)
         events = EventBus()
         approvals = ApprovalGate(events)
-        runtime = ToolRuntime(workspace, command_approver=approvals.request)
+        runtime = ToolRuntime(workspace, approver=approvals.request, mode=AgentMode(args.mode))
         model = OpenAIChatModel.from_config(config)
         agent = AgentSession(
             model,

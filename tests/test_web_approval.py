@@ -4,18 +4,28 @@ import threading
 
 from minicodex.web.approval import ApprovalGate
 from minicodex.web.events import EventBus
+from minicodex.permissions import ApprovalPrompt
+
+
+def command_prompt(argv=None) -> ApprovalPrompt:
+    return ApprovalPrompt(
+        kind="command", tool="run_command", summary="run a command", reason="ACT requires approval",
+        risk="medium", rule_id="act.command",
+        details={"argv": argv or ["python", "-m", "pytest"], "purpose": "test", "timeout_sec": 30, "index": 0},
+    )
 
 
 def test_approval_gate_blocks_until_matching_request_is_allowed() -> None:
     bus = EventBus()
     gate = ApprovalGate(bus, wait_timeout=0.5)
     decisions: list[bool] = []
-    thread = threading.Thread(target=lambda: decisions.append(gate.request(["python", "-m", "pytest"], "test", 30)))
+    thread = threading.Thread(target=lambda: decisions.append(gate.request(command_prompt())))
     thread.start()
 
     event = bus.wait_after(0, timeout=0.2)[0]
     assert event.type == "approval_required"
-    assert event.payload["purpose"] == "test"
+    assert event.payload["kind"] == "command"
+    assert event.payload["details"]["purpose"] == "test"
     assert gate.resolve(event.payload["request_id"], True)
     thread.join(0.5)
 
@@ -28,7 +38,7 @@ def test_approval_gate_rejects_on_timeout_and_stale_id() -> None:
     gate = ApprovalGate(bus, wait_timeout=0.01)
 
     assert gate.resolve("not-pending", True) is False
-    assert gate.request(["python", "-V"], "other", 30) is False
+    assert gate.request(command_prompt(["python", "-V"])) is False
     resolved = [event for event in bus.after(0) if event.type == "approval_resolved"]
     assert resolved[-1].payload["reason"] == "timeout"
 
@@ -36,7 +46,7 @@ def test_approval_gate_rejects_on_timeout_and_stale_id() -> None:
 def test_approval_gate_reports_waiting_and_running_status() -> None:
     bus = EventBus()
     gate = ApprovalGate(bus, wait_timeout=0.5)
-    thread = threading.Thread(target=lambda: gate.request(["pytest"], "test", 120))
+    thread = threading.Thread(target=lambda: gate.request(command_prompt(["pytest"])))
     thread.start()
     event = bus.wait_after(0, timeout=0.2)[0]
     assert gate.resolve(event.payload["request_id"], True)

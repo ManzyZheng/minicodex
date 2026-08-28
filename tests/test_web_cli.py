@@ -8,6 +8,7 @@ def test_web_cli_exposes_only_local_port_configuration() -> None:
     assert args.workspace == "demo"
     assert args.port == 8123
     assert not hasattr(args, "host")
+    assert args.mode == "act"
 
 
 def test_serve_always_binds_to_loopback(monkeypatch) -> None:

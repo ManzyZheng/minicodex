@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..agent import AgentSession
+from ..permissions import AgentMode
 from .approval import ApprovalGate
 from .events import EventBus
 
@@ -40,6 +41,7 @@ class WebSession:
                 "workspace": str(self.workspace),
                 "model": self.model_name,
                 "max_turns_per_prompt": self.max_turns_per_prompt,
+                "mode": self.agent.tools.mode.value,
             },
         )
 
@@ -68,21 +70,31 @@ class WebSession:
             "model": self.model_name,
             "status": status,
             "verification_status": self._verification_status(),
+            "mode": self.agent.tools.mode.value,
             "max_turns_per_prompt": self.max_turns_per_prompt,
             "prompt_count": self.agent.prompt_count,
             "event_id": event_id,
-            "pending_approval": (
-                {
-                    "request_id": pending.id,
-                    "argv": pending.argv,
-                    "purpose": pending.purpose,
-                    "timeout_sec": pending.timeout_sec,
-                    "approval_timeout_sec": self.approvals.wait_timeout,
-                }
-                if pending
-                else None
-            ),
+            "pending_approval": pending.to_payload(wait_timeout=self.approvals.wait_timeout) if pending else None,
         }
+
+    def set_mode(self, mode: AgentMode) -> AgentMode:
+        with self._condition:
+            if self._status != "IDLE":
+                raise SessionBusyError("mode can only change while the Agent is idle")
+            self.agent.set_mode(mode)
+        return mode
+
+    def approve_plan(self, mode: AgentMode) -> None:
+        if mode is AgentMode.PLAN:
+            raise ValueError("an approved plan must continue in act or auto-act mode")
+        prompt = "Implement the approved plan above. Preserve its constraints and verify the completed changes."
+        with self._condition:
+            if self._status != "IDLE":
+                raise SessionBusyError("the Agent must be idle before approving a plan")
+            if self.agent.tools.mode is not AgentMode.PLAN:
+                raise ValueError("the session is not in Plan Mode")
+            self.agent.set_mode(mode)
+            self._start_prompt_locked(prompt)
 
     def submit_prompt(self, text: str) -> None:
         prompt = text.strip()
@@ -95,10 +107,13 @@ class WebSession:
                 raise RuntimeError("web session is closed")
             if self._status != "IDLE":
                 raise SessionBusyError("an Agent prompt is already running")
-            self._status = "RUNNING"
-            self.events.publish("status", {"value": "RUNNING"})
-            self._worker = threading.Thread(target=self._run_prompt, args=(prompt,), daemon=True)
-            self._worker.start()
+            self._start_prompt_locked(prompt)
+
+    def _start_prompt_locked(self, prompt: str) -> None:
+        self._status = "RUNNING"
+        self.events.publish("status", {"value": "RUNNING"})
+        self._worker = threading.Thread(target=self._run_prompt, args=(prompt,), daemon=True)
+        self._worker.start()
 
     def _run_prompt(self, prompt: str) -> None:
         try:

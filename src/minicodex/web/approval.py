@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from uuid import uuid4
 
+from ..permissions import ApprovalPrompt
 from .events import EventBus
 
 
 @dataclass(frozen=True)
 class ApprovalRequest:
     id: str
-    argv: list[str]
-    purpose: str
-    timeout_sec: int
+    prompt: ApprovalPrompt
+
+    def to_payload(self, *, wait_timeout: float) -> dict:
+        return {"request_id": self.id, **asdict(self.prompt), "approval_timeout_sec": wait_timeout}
 
 
 class ApprovalGate:
@@ -29,27 +31,18 @@ class ApprovalGate:
         with self._condition:
             return self._pending
 
-    def request(self, argv: list[str], purpose: str, timeout_sec: int) -> bool:
+    def request(self, prompt: ApprovalPrompt) -> bool:
         with self._condition:
             if self._closed:
                 return False
             if self._pending is not None:
-                raise RuntimeError("another command approval is already pending")
-            request = ApprovalRequest(uuid4().hex, list(argv), purpose, timeout_sec)
+                raise RuntimeError("another approval is already pending")
+            request = ApprovalRequest(uuid4().hex, prompt)
             self._pending = request
             self._resolved = False
             self._decision = False
 
-        self.events.publish(
-            "approval_required",
-            {
-                "request_id": request.id,
-                "argv": request.argv,
-                "purpose": request.purpose,
-                "timeout_sec": request.timeout_sec,
-                "approval_timeout_sec": self.wait_timeout,
-            },
-        )
+        self.events.publish("approval_required", request.to_payload(wait_timeout=self.wait_timeout))
         self.events.publish("status", {"value": "WAITING_APPROVAL"})
 
         with self._condition:

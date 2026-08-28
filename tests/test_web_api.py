@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from minicodex.agent import AgentSession
 from minicodex.models import ModelReply
+from minicodex.permissions import AgentMode
 from minicodex.tools import ToolRuntime
 from minicodex.web.app import create_app, format_sse_event
 from minicodex.web.approval import ApprovalGate
@@ -28,7 +29,7 @@ def make_client(tmp_path):
     events = EventBus()
     approvals = ApprovalGate(events, wait_timeout=0.2)
     model = BlockingModel()
-    runtime = ToolRuntime(tmp_path, command_approver=approvals.request)
+    runtime = ToolRuntime(tmp_path, approver=approvals.request)
     agent = AgentSession(model, runtime, on_event=events.publish)
     session = WebSession(agent, events, approvals, workspace=tmp_path, model_name="demo", max_turns_per_prompt=20)
     return TestClient(create_app(session, access_token="test-token"), base_url="http://127.0.0.1"), session, model
@@ -76,3 +77,14 @@ def test_app_rejects_non_loopback_host(tmp_path) -> None:
 def test_sse_formatter_uses_id_event_and_compact_json() -> None:
     event = WebEvent(7, "status", "2026-08-27T00:00:00Z", {"value": "IDLE"})
     assert format_sse_event(event) == 'id: 7\nevent: status\ndata: {"value":"IDLE"}\n\n'
+
+
+def test_mode_endpoint_updates_session_and_rejects_invalid_mode(tmp_path) -> None:
+    client, session, _model = make_client(tmp_path)
+
+    changed = client.post(api(client, "/api/mode"), json={"mode": "plan"})
+
+    assert changed.status_code == 200
+    assert changed.json() == {"mode": "plan"}
+    assert session.agent.tools.mode is AgentMode.PLAN
+    assert client.post(api(client, "/api/mode"), json={"mode": "yolo"}).status_code == 422

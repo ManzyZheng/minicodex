@@ -7,15 +7,24 @@ from typing import Any, Callable, Protocol
 
 from .context import compact_messages, serialize_tool_result
 from .models import ModelReply, ToolCall, ToolResult
+from .permissions import AgentMode
 from .session import SessionTrace
 from .tools import TOOL_SCHEMAS, ToolRuntime
 
 
 SYSTEM_PROMPT = """You are MiniCodex, a coding agent working only inside the provided workspace.
 Inspect before changing existing files. Use edit_file only with an exact unique old_text.
-Use argv arrays for commands. Tool errors are recoverable: read the error and adjust.
+Use run_command.commands for sequential command batches; every command must use a structured argv array.
+Set stop_on_failure=true when later commands depend on earlier success.
+Tool errors are recoverable: read the error and adjust.
 After changing code, run a relevant test, build, or lint command when possible.
 Be honest in the final answer about what was verified and what was not."""
+
+PLAN_MODE_PROMPT = """
+
+# PLAN MODE · READ ONLY
+Explore the workspace and return a concrete Markdown plan. This mode is read-only: do not edit files or run commands.
+Include the goal, relevant files, implementation steps, risks, and verification commands. The user must approve the plan before implementation."""
 
 
 class Model(Protocol):
@@ -57,7 +66,22 @@ class AgentSession:
         self.on_tool_result = on_tool_result
         self.on_event = on_event
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.set_mode(self.tools.mode, emit=False)
         self.prompt_count = 0
+
+    def set_mode(self, mode: AgentMode, *, emit: bool = True) -> None:
+        previous = getattr(self.tools, "mode", mode)
+        self.tools.set_mode(mode)
+        self.messages[0]["content"] = SYSTEM_PROMPT + (PLAN_MODE_PROMPT if mode is AgentMode.PLAN else "")
+        if emit and previous is not mode:
+            payload = {"from": previous.value, "to": mode.value}
+            self._trace("mode_changed", payload)
+            self._emit("mode_changed", payload)
+
+    def _tool_schemas(self) -> list[dict[str, Any]]:
+        if self.tools.mode is AgentMode.PLAN:
+            return [schema for schema in TOOL_SCHEMAS if schema["function"]["name"] in {"list_files", "search_text", "read_file"}]
+        return TOOL_SCHEMAS
 
     def _trace(self, event: str, payload: dict[str, Any]) -> None:
         if self.trace:
@@ -146,7 +170,7 @@ class AgentSession:
             while turns < self.max_turns_per_prompt:
                 turns += 1
                 self.messages = compact_messages(self.messages)
-                reply = self.model.complete(self.messages, TOOL_SCHEMAS)
+                reply = self.model.complete(self.messages, self._tool_schemas())
                 self._trace(
                     "model_reply",
                     {
@@ -195,17 +219,21 @@ class AgentSession:
                             },
                         )
                     if call.name == "run_command" and isinstance(result.data, dict):
-                        self._emit(
-                            "command_output",
-                            {
-                                "call_id": call.id,
-                                "argv": result.data.get("argv", call.arguments.get("argv", [])),
-                                "purpose": result.data.get("purpose", call.arguments.get("purpose")),
-                                "exit_code": result.data.get("exit_code"),
-                                "stdout": result.data.get("stdout", ""),
-                                "stderr": result.data.get("stderr", ""),
-                            },
-                        )
+                        for step in result.data.get("commands", []):
+                            self._emit(
+                                "command_output",
+                                {
+                                    "call_id": call.id,
+                                    "index": step.get("index"),
+                                    "status": step.get("status"),
+                                    "argv": step.get("argv", []),
+                                    "purpose": step.get("purpose"),
+                                    "exit_code": step.get("exit_code"),
+                                    "stdout": step.get("stdout", ""),
+                                    "stderr": step.get("stderr", ""),
+                                    "permission": step.get("permission"),
+                                },
+                            )
                         self._emit(
                             "verification",
                             {"status": self._verification_status(), "evidence": self.tools.last_verification},

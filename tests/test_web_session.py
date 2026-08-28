@@ -6,6 +6,7 @@ import pytest
 
 from minicodex.agent import AgentSession
 from minicodex.models import ModelReply
+from minicodex.permissions import AgentMode
 from minicodex.tools import ToolRuntime
 from minicodex.web.approval import ApprovalGate
 from minicodex.web.events import EventBus
@@ -34,7 +35,7 @@ class BlockingModel:
 def make_web_session(tmp_path, model) -> WebSession:
     events = EventBus()
     approvals = ApprovalGate(events, wait_timeout=0.2)
-    runtime = ToolRuntime(tmp_path, command_approver=approvals.request)
+    runtime = ToolRuntime(tmp_path, approver=approvals.request)
     agent = AgentSession(model, runtime, on_event=events.publish)
     return WebSession(
         agent,
@@ -80,3 +81,35 @@ def test_close_reports_closing_until_worker_finishes(tmp_path) -> None:
     model.release.set()
     assert web.wait_until_idle(timeout=1.0)
     assert web.snapshot()["status"] == "CLOSED"
+
+
+def test_web_session_changes_mode_only_while_idle(tmp_path) -> None:
+    model = BlockingModel()
+    web = make_web_session(tmp_path, model)
+    assert web.set_mode(AgentMode.PLAN) == AgentMode.PLAN
+    assert web.snapshot()["mode"] == "plan"
+
+    web.submit_prompt("plan it")
+    assert model.started.wait(0.5)
+    with pytest.raises(SessionBusyError):
+        web.set_mode(AgentMode.ACT)
+    model.release.set()
+    assert web.wait_until_idle(1.0)
+
+
+def test_approving_plan_switches_mode_and_continues_same_session(tmp_path) -> None:
+    model = ReplyModel([ModelReply(content="## Plan\n\nChange app.py"), ModelReply(content="implemented")])
+    web = make_web_session(tmp_path, model)
+    web.set_mode(AgentMode.PLAN)
+    web.submit_prompt("design the feature")
+    assert web.wait_until_idle(1.0)
+
+    web.approve_plan(AgentMode.AUTO_ACT)
+
+    assert web.wait_until_idle(1.0)
+    assert web.snapshot()["mode"] == "auto-act"
+    assert web.agent.prompt_count == 2
+    assert any(
+        message.get("role") == "user" and "approved plan" in str(message.get("content", "")).lower()
+        for message in web.agent.messages
+    )

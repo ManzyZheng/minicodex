@@ -7,6 +7,7 @@ from pathlib import Path
 from minicodex.agent import Agent, AgentSession, StopReason
 from minicodex.context import compact_messages, serialize_tool_result, truncate_text
 from minicodex.models import ModelReply, ToolCall
+from minicodex.permissions import AgentMode
 from minicodex.session import SessionTrace
 from minicodex.tools import ToolRuntime
 
@@ -15,9 +16,11 @@ class MockModel:
     def __init__(self, replies: list[ModelReply]) -> None:
         self.replies = replies
         self.messages_seen: list[list[dict]] = []
+        self.tools_seen: list[list[dict]] = []
 
     def complete(self, messages: list[dict], tools: list[dict]) -> ModelReply:
         self.messages_seen.append(list(messages))
+        self.tools_seen.append(list(tools))
         return self.replies.pop(0)
 
 
@@ -48,12 +51,12 @@ def test_agent_executes_tools_feeds_errors_back_and_finishes(tmp_path: Path) -> 
         ModelReply(tool_calls=[ToolCall("2", "read_file", {"path": "a.txt"})]),
         ModelReply(tool_calls=[ToolCall("3", "edit_file", {"path": "a.txt", "old_text": "old", "new_text": "new"})]),
         ModelReply(content="done"),
-        ModelReply(tool_calls=[ToolCall("4", "run_command", {"argv": ["python", "-c", "print('ok')"], "purpose": "test"})]),
+        ModelReply(tool_calls=[ToolCall("4", "run_command", {"commands": [{"argv": ["python", "-c", "print('ok')"], "purpose": "test"}]})]),
         ModelReply(content="fixed and tested"),
     ])
     (tmp_path / "test_sample.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
-    model.replies[4] = ModelReply(tool_calls=[ToolCall("4", "run_command", {"argv": [sys.executable, "-m", "pytest", "-q"], "purpose": "test"})])
-    agent = Agent(model, ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True), max_turns=10)
+    model.replies[4] = ModelReply(tool_calls=[ToolCall("4", "run_command", {"commands": [{"argv": [sys.executable, "-m", "pytest", "-q"], "purpose": "test"}]})])
+    agent = Agent(model, ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT), max_turns=10)
     outcome = agent.run("fix a.txt")
     assert outcome.stop_reason is StopReason.COMPLETED
     assert outcome.verification_status == "VERIFIED"
@@ -68,13 +71,13 @@ def test_agent_executes_tools_feeds_errors_back_and_finishes(tmp_path: Path) -> 
 def test_agent_stops_three_identical_tool_calls_without_progress(tmp_path: Path) -> None:
     call = ToolCall("same", "read_file", {"path": "missing.txt"})
     model = MockModel([ModelReply(tool_calls=[call]), ModelReply(tool_calls=[call]), ModelReply(tool_calls=[call])])
-    outcome = Agent(model, ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True), max_turns=10).run("loop")
+    outcome = Agent(model, ToolRuntime(tmp_path, approver=lambda _request: True), max_turns=10).run("loop")
     assert outcome.stop_reason is StopReason.REPEATED_CALL
 
 
 def test_agent_stops_at_max_turns(tmp_path: Path) -> None:
     replies = [ModelReply(tool_calls=[ToolCall(str(i), "list_files", {})]) for i in range(4)]
-    outcome = Agent(MockModel(replies), ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True), max_turns=2).run("work")
+    outcome = Agent(MockModel(replies), ToolRuntime(tmp_path, approver=lambda _request: True), max_turns=2).run("work")
     assert outcome.stop_reason is StopReason.MAX_TURNS
     assert outcome.turns == 2
 
@@ -88,7 +91,7 @@ def test_agent_reports_tool_results_to_ui_callback(tmp_path: Path) -> None:
     ])
     agent = Agent(
         model,
-        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT),
         max_turns=3,
         on_tool_result=events.append,
     )
@@ -132,7 +135,7 @@ def test_agent_session_keeps_messages_between_prompts(tmp_path: Path) -> None:
     model = MockModel([ModelReply(content="first done"), ModelReply(content="second done")])
     session = AgentSession(
         model,
-        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT),
         max_turns_per_prompt=20,
     )
 
@@ -151,7 +154,7 @@ def test_agent_session_resets_model_turn_limit_for_each_prompt(tmp_path: Path) -
     model = MockModel([ModelReply(content="one"), ModelReply(content="two")])
     session = AgentSession(
         model,
-        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT),
         max_turns_per_prompt=1,
     )
 
@@ -170,7 +173,7 @@ def test_agent_session_emits_tool_diff_and_completion_events(tmp_path: Path) -> 
     events: list[tuple[str, dict]] = []
     session = AgentSession(
         model,
-        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT),
         on_event=lambda event_type, payload: events.append((event_type, payload)),
     )
 
@@ -191,7 +194,7 @@ def test_agent_session_repairs_unanswered_tool_calls_before_next_prompt(tmp_path
     model = MockModel([ModelReply(tool_calls=repeated_calls), ModelReply(content="continued safely")])
     session = AgentSession(
         model,
-        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT),
     )
 
     assert session.run_turn("trigger repeated failures").stop_reason is StopReason.REPEATED_CALL
@@ -208,7 +211,7 @@ def test_final_reply_emits_once_and_keeps_final_turn_number(tmp_path: Path) -> N
     events: list[tuple[str, dict]] = []
     session = AgentSession(
         MockModel([ModelReply(content="## Finished\n\nAll tests passed.")]),
-        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT),
         on_event=lambda event_type, payload: events.append((event_type, payload)),
     )
 
@@ -227,7 +230,7 @@ def test_agent_emits_and_traces_reasoning_without_mixing_it_into_final_text(tmp_
     reply.reasoning_content = "inspect the implementation first"
     session = AgentSession(
         MockModel([reply]),
-        ToolRuntime(tmp_path, command_approver=lambda _argv, _purpose, _timeout: True),
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT),
         trace=SessionTrace(trace_path),
         on_event=lambda event_type, payload: events.append((event_type, payload)),
     )
@@ -242,3 +245,39 @@ def test_agent_emits_and_traces_reasoning_without_mixing_it_into_final_text(tmp_
     records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
     model_record = next(record for record in records if record["event"] == "model_reply")
     assert model_record["payload"]["reasoning_content"] == "inspect the implementation first"
+
+
+def test_plan_mode_exposes_only_read_tools_and_injects_read_only_prompt(tmp_path: Path) -> None:
+    model = MockModel([ModelReply(content="## Plan\n\nRead the code, then implement later.")])
+    runtime = ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.PLAN)
+    session = AgentSession(model, runtime)
+
+    session.run_turn("design the change")
+
+    names = {schema["function"]["name"] for schema in model.tools_seen[0]}
+    assert names == {"list_files", "search_text", "read_file"}
+    assert "PLAN MODE" in model.messages_seen[0][0]["content"]
+    assert "read-only" in model.messages_seen[0][0]["content"]
+
+
+def test_agent_emits_each_batch_command_output_separately(tmp_path: Path) -> None:
+    events: list[tuple[str, dict]] = []
+    model = MockModel([
+        ModelReply(tool_calls=[ToolCall("batch", "run_command", {"commands": [
+            {"argv": [sys.executable, "-c", "print('one')"], "purpose": "other"},
+            {"argv": [sys.executable, "-c", "print('two')"], "purpose": "other"},
+        ]})]),
+        ModelReply(content="done"),
+    ])
+    session = AgentSession(
+        model,
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.ACT),
+        on_event=lambda event_type, payload: events.append((event_type, payload)),
+    )
+
+    session.run_turn("run both")
+
+    outputs = [payload for event_type, payload in events if event_type == "command_output"]
+    assert [item["index"] for item in outputs] == [0, 1]
+    assert outputs[0]["stdout"].strip() == "one"
+    assert outputs[1]["stdout"].strip() == "two"

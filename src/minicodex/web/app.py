@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from ..permissions import AgentMode
 from .events import WebEvent
 from .session import SessionBusyError, WebSession
 
@@ -21,6 +22,10 @@ class PromptRequest(BaseModel):
 
 class ApprovalDecision(BaseModel):
     allow: bool
+
+
+class ModeRequest(BaseModel):
+    mode: AgentMode
 
 
 def format_sse_event(event: WebEvent) -> str:
@@ -76,6 +81,24 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"status": "accepted"}
+
+    @app.post("/api/mode")
+    def change_mode(body: ModeRequest) -> dict[str, str]:
+        try:
+            mode = web_session.set_mode(body.mode)
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"mode": mode.value}
+
+    @app.post("/api/plans/approve", status_code=status.HTTP_202_ACCEPTED)
+    def approve_plan(body: ModeRequest) -> dict[str, str]:
+        try:
+            web_session.approve_plan(body.mode)
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"status": "accepted", "mode": body.mode.value}
 
     @app.post("/api/approvals/{request_id}")
     def resolve_approval(request_id: str, body: ApprovalDecision) -> dict[str, str]:
