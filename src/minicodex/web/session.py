@@ -37,12 +37,14 @@ class WebSession:
         workspace: str | Path,
         model_name: str,
         max_turns_per_prompt: int,
+        allowed_models: tuple[str, ...] | None = None,
     ) -> None:
         self.agent = agent
         self.events = events
         self.approvals = approvals
         self.workspace = Path(workspace).resolve()
         self.model_name = model_name
+        self.allowed_models = allowed_models or (model_name,)
         self.max_turns_per_prompt = max_turns_per_prompt
         self._condition = threading.Condition()
         self._status = "IDLE"
@@ -86,6 +88,7 @@ class WebSession:
         return {
             "workspace": str(self.workspace),
             "model": self.model_name,
+            "allowed_models": list(self.allowed_models),
             "status": status,
             "verification_status": self._verification_status(),
             "mode": self.agent.tools.mode.value,
@@ -172,7 +175,13 @@ class WebSession:
                 f"{plan.text}"
             )
 
-    def submit_prompt(self, text: str) -> None:
+    def submit_prompt(
+        self,
+        text: str,
+        *,
+        permission: AgentMode | None = None,
+        model: str | None = None,
+    ) -> None:
         prompt = text.strip()
         if not prompt:
             raise ValueError("prompt must not be empty")
@@ -183,6 +192,15 @@ class WebSession:
                 raise RuntimeError("web session is closed")
             if self._status != "IDLE":
                 raise SessionBusyError("an Agent prompt is already running")
+            if permission is not None:
+                self.agent.set_execution_mode(permission)
+            if model is not None:
+                if model not in self.allowed_models:
+                    raise ValueError(f"model is not allowed: {model}")
+                setter = getattr(self.agent.model, "set_model", None)
+                if callable(setter):
+                    setter(model)
+                self.model_name = model
             if self._pending_plan is not None:
                 plan = self._pending_plan
                 self._pending_plan = None

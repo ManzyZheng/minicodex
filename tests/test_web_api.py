@@ -129,3 +129,28 @@ def test_plan_resolve_endpoint_rejects_invalid_action_and_stale_id(tmp_path) -> 
 
     assert invalid.status_code == 422
     assert stale.status_code == 409
+
+
+def test_prompt_accepts_execution_permission_but_rejects_plan_and_unknown_model(tmp_path) -> None:
+    client, session, model = make_client(tmp_path)
+
+    plan = client.post(
+        api(client, "/api/prompts"),
+        json={"text": "work", "permission": "plan", "model": "demo"},
+    )
+    unknown = client.post(
+        api(client, "/api/prompts"),
+        json={"text": "work", "permission": "auto-act", "model": "unknown"},
+    )
+    accepted = client.post(
+        api(client, "/api/prompts"),
+        json={"text": "work", "permission": "auto-act", "model": "demo"},
+    )
+
+    assert plan.status_code == 422
+    assert unknown.status_code == 422
+    assert accepted.status_code == 202
+    assert session.agent.execution_mode is AgentMode.AUTO_ACT
+    assert model.started.wait(0.5)
+    model.release.set()
+    assert session.wait_until_idle(1.0)

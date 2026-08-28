@@ -15,6 +15,7 @@ class ConfigError(ValueError):
 class Config:
     api_key: str = field(repr=False)
     model: str
+    allowed_models: tuple[str, ...] = ()
     base_url: str | None = None
     enable_thinking: bool = False
     max_turns: int = 20
@@ -33,9 +34,17 @@ class Config:
             raise ConfigError("MINICODEX_API_KEY or DASHSCOPE_API_KEY is required")
         if not selected_model:
             raise ConfigError("MINICODEX_MODEL is required (or pass --model)")
+        configured_models = os.getenv("MINICODEX_MODELS") or dotenv.get("MINICODEX_MODELS") or ""
+        allowed_models = tuple(
+            dict.fromkeys(
+                [selected_model]
+                + [item.strip() for item in configured_models.split(",") if item.strip() and item.strip() != selected_model]
+            )
+        )
         return cls(
             api_key=api_key,
             model=selected_model,
+            allowed_models=allowed_models,
             base_url=os.getenv("MINICODEX_BASE_URL") or dotenv.get("MINICODEX_BASE_URL") or None,
             enable_thinking=(os.getenv("MINICODEX_ENABLE_THINKING") or dotenv.get("MINICODEX_ENABLE_THINKING") or "false").strip().lower()
             in {"1", "true", "yes", "on"},

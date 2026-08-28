@@ -42,6 +42,11 @@ class OpenAIChatModel:
             "APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError"
         }
 
+    def set_model(self, model: str) -> None:
+        if not model.strip():
+            raise ValueError("model must not be empty")
+        self.model = model
+
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelReply:
         for attempt in range(3):
             try:

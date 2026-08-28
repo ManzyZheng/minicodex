@@ -62,3 +62,14 @@ def test_openai_adapter_accepts_compatible_models_without_reasoning_field() -> N
     reply = model.complete([], [])
     assert reply.content == "plain answer"
     assert reply.reasoning_content is None
+
+
+def test_openai_adapter_model_can_change_between_prompts() -> None:
+    completions = FakeCompletions([response(content="one"), response(content="two")])
+    model = OpenAIChatModel(client_with(completions), model="first")
+
+    model.complete([], [])
+    model.set_model("second")
+    model.complete([], [])
+
+    assert [call["model"] for call in completions.calls] == ["first", "second"]

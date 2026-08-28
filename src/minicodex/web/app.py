@@ -19,6 +19,8 @@ from .session import PlanResolutionError, SessionBusyError, WebSession
 
 class PromptRequest(BaseModel):
     text: str
+    permission: Literal["act", "auto-act"] | None = None
+    model: str | None = None
 
 
 class ApprovalDecision(BaseModel):
@@ -81,7 +83,8 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
         if not body.text.strip():
             raise HTTPException(status_code=422, detail="prompt must not be empty")
         try:
-            web_session.submit_prompt(body.text)
+            permission = AgentMode(body.permission) if body.permission is not None else None
+            web_session.submit_prompt(body.text, permission=permission, model=body.model)
         except SessionBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:

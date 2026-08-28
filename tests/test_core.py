@@ -17,7 +17,18 @@ def test_config_reads_key_from_environment_without_storing_it_in_repr(monkeypatc
     config = Config.from_env()
     assert config.api_key == "top-secret"
     assert config.model == "demo-model"
+    assert config.allowed_models == ("demo-model",)
     assert "top-secret" not in repr(config)
+
+
+def test_config_parses_trims_and_deduplicates_allowed_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINICODEX_API_KEY", "test-key")
+    monkeypatch.setenv("MINICODEX_MODEL", "qwen3.8-flash")
+    monkeypatch.setenv("MINICODEX_MODELS", "qwen-plus, qwen3.8-flash, qwen-plus,  ")
+
+    config = Config.from_env()
+
+    assert config.allowed_models == ("qwen3.8-flash", "qwen-plus")
 
 
 def test_config_requires_api_key_without_environment_or_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

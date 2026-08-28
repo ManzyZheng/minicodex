@@ -109,6 +109,12 @@ class AgentSession:
             self.pending_plan_text = None
         self._apply_effective_mode(emit=emit)
 
+    def set_execution_mode(self, mode: AgentMode, *, emit: bool = True) -> None:
+        if mode is AgentMode.PLAN:
+            raise ValueError("PLAN is a temporary Agent state, not an execution permission")
+        self.execution_mode = mode
+        self._apply_effective_mode(emit=emit)
+
     def _apply_effective_mode(self, *, emit: bool = True) -> None:
         previous = self.tools.mode
         effective = AgentMode.PLAN if self.plan_state is not PlanState.INACTIVE else self.execution_mode

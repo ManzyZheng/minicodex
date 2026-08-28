@@ -40,9 +40,68 @@ def local_console_url(port: int, access_token: str) -> str:
     return f"http://127.0.0.1:{port}/?token={access_token}"
 
 
+def summarize_tool_result(payload: dict) -> dict:
+    tool = str(payload.get("tool") or "tool")
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    if not payload.get("ok"):
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+        text = f"{tool} 失败 · {error.get('code') or 'UNKNOWN_ERROR'}"
+    elif tool == "read_file":
+        text = f"已读取 {data.get('path') or '文件'}"
+    elif tool == "list_files":
+        text = f"已列出 {len(data.get('files', []))} 个文件"
+    elif tool == "search_text":
+        text = f"已搜索文本，找到 {len(data.get('matches', []))} 处"
+    elif tool in {"write_file", "edit_file"}:
+        text = f"已修改 {data.get('path') or '文件'}"
+    elif tool == "run_command":
+        text = f"已运行 {len(data.get('commands', []))} 个命令"
+    else:
+        text = str(payload.get("summary") or tool)
+    return {
+        "text": text,
+        "tool": tool,
+        "ok": bool(payload.get("ok")),
+        "detail": payload,
+    }
+
+
+def summarize_command(payload: dict) -> dict:
+    exit_code = payload.get("exit_code")
+    purpose = payload.get("purpose")
+    if exit_code == 0 and purpose in {"test", "build", "lint"}:
+        text = "验证通过"
+    elif exit_code == 0:
+        text = "命令完成"
+    elif exit_code is None:
+        text = f"命令{payload.get('status') or '未执行'}"
+    else:
+        text = f"命令失败 · exit code {exit_code}"
+    return {"text": text, "detail": payload}
+
+
 def publish_agent_event(events: EventBus, event_type: str, payload: dict) -> None:
-    events.publish(event_type, payload)
     print_agent_event(event_type, payload)
+    if event_type == "model_reasoning":
+        return
+    if event_type == "model_message":
+        content = str(payload.get("content") or "").strip()
+        if content:
+            events.publish("progress", {"text": content, "turn": payload.get("turn")})
+        return
+    if event_type == "tool_result":
+        events.publish("tool_summary", summarize_tool_result(payload))
+        return
+    if event_type == "command_output":
+        events.publish("command_summary", summarize_command(payload))
+        return
+    if event_type == "turn_completed":
+        events.publish("final_answer", payload)
+        events.publish("turn_completed", payload)
+        return
+    if event_type in {"tool_call", "diff"}:
+        return
+    events.publish(event_type, payload)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             workspace=workspace,
             model_name=config.model,
             max_turns_per_prompt=config.max_turns,
+            allowed_models=config.allowed_models,
         )
     except (OSError, ValueError, ConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
