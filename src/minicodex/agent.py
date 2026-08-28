@@ -243,6 +243,7 @@ class AgentSession:
 
     def run_turn(self, prompt: str) -> AgentOutcome:
         self.prompt_count += 1
+        self.tools.begin_prompt(self.prompt_count)
         self.messages.append({"role": "user", "content": prompt})
         self._emit("user_prompt", {"text": prompt, "prompt_index": self.prompt_count})
         turns = 0
@@ -308,6 +309,7 @@ class AgentSession:
                         self.on_tool_result(result)
                     self._emit("tool_result", result.to_dict())
                     if result.ok and isinstance(result.data, dict) and result.data.get("diff"):
+                        self._emit("file_changed", dict(result.data))
                         self._emit(
                             "diff",
                             {

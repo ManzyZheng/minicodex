@@ -4,6 +4,7 @@ import difflib
 import os
 import subprocess
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -13,6 +14,19 @@ from .workspace import WorkspaceError, WorkspaceGuard
 
 
 Approver = Callable[[ApprovalPrompt], bool]
+
+
+@dataclass
+class FileChange:
+    path: str
+    prompt_index: int
+    before: str
+    after: str
+    additions: int
+    deletions: int
+    diff: str
+    first_change_seq: int
+    last_change_seq: int
 
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -34,6 +48,8 @@ class ToolRuntime:
         self.read_paths: set[Path] = set()
         self.change_seq = 0
         self.last_verification: dict[str, Any] | None = None
+        self.prompt_index = 0
+        self._file_changes: dict[int, dict[Path, FileChange]] = {}
 
     def _failure(self, tool: str, call_id: str, code: str, message: str) -> ToolResult:
         return ToolResult.failure(tool=tool, call_id=call_id, code=code, message=message)
@@ -100,10 +116,57 @@ class ToolRuntime:
             return self._failure(tool, call_id, "READ_REQUIRED", "existing file must be read before editing")
         return None
 
-    def _changed(self, target: Path) -> None:
+    @staticmethod
+    def _diff_stats(diff: str) -> tuple[int, int]:
+        lines = diff.splitlines()
+        additions = sum(line.startswith("+") and not line.startswith("+++") for line in lines)
+        deletions = sum(line.startswith("-") and not line.startswith("---") for line in lines)
+        return additions, deletions
+
+    def begin_prompt(self, prompt_index: int) -> None:
+        self.prompt_index = prompt_index
+        self._file_changes.setdefault(prompt_index, {})
+
+    def _changed(self, target: Path, before: str, after: str) -> FileChange:
         self.read_paths.add(target)
         self.change_seq += 1
         self.last_verification = None
+        changes = self._file_changes.setdefault(self.prompt_index, {})
+        existing = changes.get(target)
+        baseline = existing.before if existing else before
+        path = self.guard.relative(target)
+        diff = "".join(
+            difflib.unified_diff(
+                baseline.splitlines(True),
+                after.splitlines(True),
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+            )
+        )
+        additions, deletions = self._diff_stats(diff)
+        change = FileChange(
+            path=path,
+            prompt_index=self.prompt_index,
+            before=baseline,
+            after=after,
+            additions=additions,
+            deletions=deletions,
+            diff=diff,
+            first_change_seq=existing.first_change_seq if existing else self.change_seq,
+            last_change_seq=self.change_seq,
+        )
+        changes[target] = change
+        return change
+
+    def changes_snapshot(self, prompt_index: int | None = None) -> list[dict[str, Any]]:
+        if prompt_index is not None:
+            changes = self._file_changes.get(prompt_index, {})
+            return [asdict(change) for change in sorted(changes.values(), key=lambda item: item.path)]
+        return [
+            asdict(change)
+            for index in sorted(self._file_changes)
+            for change in sorted(self._file_changes[index].values(), key=lambda item: item.path)
+        ]
 
     def set_mode(self, mode: AgentMode) -> None:
         self.mode = mode
@@ -142,10 +205,10 @@ class ToolRuntime:
             return self._failure("write_file", call_id, code, decision.reason if decision.action is PermissionAction.DENY else "user rejected file change")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        self._changed(target)
+        change = self._changed(target, old, content)
         return ToolResult.success(
             tool="write_file", call_id=call_id, summary=f"wrote {path}",
-            data={"path": path, "diff": diff, "permission": decision.rule_id},
+            data={**asdict(change), "permission": decision.rule_id},
         )
 
     def edit_file(self, call_id: str, path: str, old_text: str, new_text: str) -> ToolResult:
@@ -166,10 +229,10 @@ class ToolRuntime:
             code = "PERMISSION_DENIED" if decision.action is PermissionAction.DENY else "CHANGE_REJECTED"
             return self._failure("edit_file", call_id, code, decision.reason if decision.action is PermissionAction.DENY else "user rejected file change")
         target.write_text(new, encoding="utf-8")
-        self._changed(target)
+        change = self._changed(target, old, new)
         return ToolResult.success(
             tool="edit_file", call_id=call_id, summary=f"edited {path}",
-            data={"path": path, "diff": diff, "permission": decision.rule_id},
+            data={**asdict(change), "permission": decision.rule_id},
         )
 
     def run_command(self, call_id: str, commands: list[dict[str, Any]], *, stop_on_failure: bool = True) -> ToolResult:

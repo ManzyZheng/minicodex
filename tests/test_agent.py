@@ -189,6 +189,31 @@ def test_agent_session_emits_tool_diff_and_completion_events(tmp_path: Path) -> 
     assert "+new" in diff_payload["diff"]
 
 
+def test_agent_emits_cumulative_file_change_for_each_successful_edit(tmp_path: Path) -> None:
+    (tmp_path / "value.txt").write_text("value = 1\n", encoding="utf-8")
+    model = MockModel([
+        ModelReply(tool_calls=[ToolCall("read", "read_file", {"path": "value.txt"})]),
+        ModelReply(tool_calls=[ToolCall("one", "edit_file", {"path": "value.txt", "old_text": "1", "new_text": "2"})]),
+        ModelReply(tool_calls=[ToolCall("two", "edit_file", {"path": "value.txt", "old_text": "2", "new_text": "3"})]),
+        ModelReply(content="done"),
+        ModelReply(content="not verified"),
+    ])
+    events: list[tuple[str, dict]] = []
+    session = AgentSession(
+        model,
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT),
+        on_event=lambda event_type, payload: events.append((event_type, payload)),
+    )
+
+    session.run_turn("修改 value")
+
+    changes = [payload for event_type, payload in events if event_type == "file_changed"]
+    assert len(changes) == 2
+    assert changes[-1]["prompt_index"] == 1
+    assert "-value = 1" in changes[-1]["diff"]
+    assert "+value = 3" in changes[-1]["diff"]
+
+
 def test_agent_session_repairs_unanswered_tool_calls_before_next_prompt(tmp_path: Path) -> None:
     repeated_calls = [ToolCall(str(index), "read_file", {"path": "missing.txt"}) for index in range(4)]
     model = MockModel([ModelReply(tool_calls=repeated_calls), ModelReply(content="continued safely")])

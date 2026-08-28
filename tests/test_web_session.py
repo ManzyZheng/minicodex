@@ -160,3 +160,18 @@ def test_cancel_plan_returns_idle_without_starting_implementation(tmp_path) -> N
     assert web.snapshot()["status"] == "IDLE"
     assert web.agent.plan_state is PlanState.INACTIVE
     assert web.agent.prompt_count == 0
+
+
+def test_session_snapshot_restores_cumulative_file_changes(tmp_path) -> None:
+    source = tmp_path / "app.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    web = make_web_session(tmp_path, ReplyModel([]), mode=AgentMode.AUTO_ACT)
+    web.agent.tools.begin_prompt(1)
+    web.agent.tools.read_file("read", "app.py")
+    web.agent.tools.edit_file("edit", "app.py", "1", "2")
+
+    snapshot = web.snapshot()
+
+    assert snapshot["file_changes"][0]["path"] == "app.py"
+    assert snapshot["file_changes"][0]["prompt_index"] == 1
+    assert "+value = 2" in snapshot["file_changes"][0]["diff"]

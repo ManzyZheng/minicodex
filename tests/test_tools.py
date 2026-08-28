@@ -27,6 +27,40 @@ def test_read_before_edit_and_unique_diff(tmp_path: Path) -> None:
     assert source.read_text(encoding="utf-8") == "value = 2\n"
 
 
+def test_multiple_edits_report_one_diff_from_prompt_start_to_latest_content(tmp_path: Path) -> None:
+    path = tmp_path / "app.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    tools = runtime(tmp_path)
+    tools.begin_prompt(1)
+    tools.read_file("r", "app.py")
+    tools.edit_file("e1", "app.py", "1", "2")
+    tools.edit_file("e2", "app.py", "2", "3")
+
+    change = tools.changes_snapshot(1)[0]
+
+    assert "-value = 1" in change["diff"]
+    assert "+value = 3" in change["diff"]
+    assert "+value = 2" not in change["diff"]
+    assert (change["additions"], change["deletions"]) == (1, 1)
+
+
+def test_each_prompt_uses_content_at_prompt_start_as_diff_baseline(tmp_path: Path) -> None:
+    path = tmp_path / "app.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    tools = runtime(tmp_path)
+    tools.begin_prompt(1)
+    tools.read_file("r1", "app.py")
+    tools.edit_file("e1", "app.py", "1", "2")
+    tools.begin_prompt(2)
+    tools.edit_file("e2", "app.py", "2", "3")
+
+    first = tools.changes_snapshot(1)[0]
+    second = tools.changes_snapshot(2)[0]
+
+    assert "-value = 1" in first["diff"] and "+value = 2" in first["diff"]
+    assert "-value = 2" in second["diff"] and "+value = 3" in second["diff"]
+
+
 def test_edit_rejects_zero_or_multiple_matches(tmp_path: Path) -> None:
     source = tmp_path / "app.py"
     source.write_text("x = 1\nx = 1\n", encoding="utf-8")

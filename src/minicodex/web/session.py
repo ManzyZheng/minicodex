@@ -92,6 +92,7 @@ class WebSession:
             "execution_mode": self.agent.execution_mode.value,
             "plan_state": self.agent.plan_state.value,
             "pending_plan": asdict(self._pending_plan) if self._pending_plan else None,
+            "file_changes": self.agent.tools.changes_snapshot(),
             "max_turns_per_prompt": self.max_turns_per_prompt,
             "prompt_count": self.agent.prompt_count,
             "event_id": event_id,
