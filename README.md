@@ -25,6 +25,8 @@
 
 当前初版按考核范围暂不实现 SHA-256/mtime 文件版本保护；read-before-edit 记录的是本次会话中已读取的规范化路径。
 
+如果想从一次 Prompt 的真实调用链开始逐文件阅读实现，请看 [CODE_WALKTHROUGH.md](CODE_WALKTHROUGH.md)。其中单独解释了 `VERIFIED` 的证据状态机、每项安全机制的代码位置、对应测试和常见答辩问题。
+
 ## 架构
 
 ```text
