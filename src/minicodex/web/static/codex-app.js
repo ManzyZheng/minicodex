@@ -301,8 +301,13 @@ async function loadSnapshot() {
   setModels(data.allowed_models, data.model);
   setVerification(data.verification_status);
   (data.file_changes || []).forEach(rememberChange);
-  if (data.pending_plan) renderPlan(data.pending_plan);
-  else setStatus(data.status);
+  if (data.pending_plan) {
+    state.pendingPlan = data.pending_plan;
+    if (state.current) renderPlan(data.pending_plan);
+    else setStatus("WAITING_PLAN_APPROVAL");
+  } else {
+    setStatus(data.status);
+  }
   if (data.pending_approval) showApproval(data.pending_approval);
   return data;
 }

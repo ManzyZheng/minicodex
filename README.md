@@ -8,15 +8,15 @@
 
 - 单 Agent 的 `model → tool calls → tool results → model` 循环。
 - 同一浏览器页面中的连续多轮会话：复用消息历史、已读文件集合、工作区修改状态和验证状态。
-- 本机 Web Console：通过 SSE 实时展示模型回复、工具调用、命令输出、彩色 Diff 与通用副作用审批；终端同步保留工具输出。
+- Codex 式本机 Web Console：以最终回答为主，过程默认折叠；文件变更卡片可打开右侧累计 Diff 审查，终端同步保留工具输出。
 - OpenAI-compatible Chat Completions Tool Calling；支持自定义 `base_url`。
-- Qwen thinking：非流式读取独立 `reasoning_content`，在终端、Web 执行过程和 JSONL Trace 中展示，不与最终答案混合。
+- Qwen thinking：非流式读取独立 `reasoning_content`，保留在终端和 JSONL Trace；Web 只显示模型主动给出的短进展与确定性工具摘要，不倾倒原始思维链。
 - 六个工具：`list_files`、`search_text`、`read_file`、`write_file`、`edit_file`、`run_command`。
 - Workspace Boundary：所有路径 resolve 后必须仍位于指定项目目录，阻止 `..`、绝对路径和符号链接逃逸。
 - Read-before-edit：已有文件必须先读再写；新文件可以直接创建。
 - 唯一匹配编辑：`old_text` 必须恰好出现一次，否则返回 `OLD_TEXT_NOT_FOUND` 或 `AMBIGUOUS_MATCH`。
-- 修改返回 unified diff，方便模型和用户检查实际变化。
-- 三种权限模式：`PLAN` 只读分析，`ACT` 对文件变化和命令逐次确认，`AUTO-ACT` 自动批准普通工作区修改和识别出的验证/只读命令。
+- 修改返回 unified diff；同一文件一轮内多次编辑时，Web 汇总为“本轮开始内容 → 最终内容”的累计 Diff。
+- 两种持久执行权限：`ACT` 对文件变化和命令逐次确认，`AUTO-ACT` 自动批准普通工作区修改和识别出的验证/只读命令；`PLAN` 是 Agent 可自主进入的临时只读阶段，不能自行提升回写权限。
 - 命令以结构化 `commands[]` 批量提交，每一步仍是 `argv: list[str]`、`shell=False`，逐条做权限判断并记录 stdout、stderr 与 exit code。
 - 敏感路径保护：`.env`、私钥、`.git` 与 `.minicodex` 不允许被 Agent 读取、搜索、枚举或修改；`.env.example` 作为脱敏模板例外。
 - 统一 `ToolResult`：工具错误被结构化回灌给模型，不会让 Agent 因一次工具失败而崩溃。
@@ -123,6 +123,7 @@ minicodex/
 | `MINICODEX_API_KEY` | 二选一 | 通用 OpenAI-compatible Key，优先级最高 |
 | `DASHSCOPE_API_KEY` | 二选一 | 阿里云百炼 Key |
 | `MINICODEX_MODEL` | 是 | 模型名称，如 `qwen3.8-flash` |
+| `MINICODEX_MODELS` | 否 | Web Composer 可选模型白名单，逗号分隔；默认只有 `MINICODEX_MODEL` |
 | `MINICODEX_BASE_URL` | 否 | OpenAI-compatible `/v1` 端点 |
 | `MINICODEX_ENABLE_THINKING` | 否 | `true/false`，控制 Qwen thinking 参数 |
 
@@ -218,13 +219,15 @@ minicodex/
 
 这相当于“前一步成功才继续”，但没有 shell parser：运行时先完整校验整批参数，再逐条调用 `subprocess.run(..., shell=False)`。每一步独立得到权限结论、stdout、stderr、exit code 和状态；失败且 `stop_on_failure=true` 时，后续步骤标记为跳过。
 
-## 权限模式
+## 执行权限与临时 PLAN
 
-| 模式 | 读文件 | 修改/新建文件 | 识别出的验证与只读命令 | 其他命令 | 用途 |
+| 状态/权限 | 读文件 | 修改/新建文件 | 识别出的验证与只读命令 | 其他命令 | 用途 |
 |---|---|---|---|---|---|
 | `PLAN` | 自动 | 禁止 | 禁止 | 禁止 | 只读探索并给出实施方案 |
 | `ACT` | 自动 | 展示 Diff 后确认 | 确认 | 确认 | 默认的逐次审阅模式 |
 | `AUTO-ACT` | 自动 | 普通工作区文件自动 | 自动 | 确认 | 类似“帮我批准”的连续开发 |
+
+Composer 中只选择 `ACT / AUTO-ACT`，它们是持续生效的执行权限。Agent 遇到解释、诊断、设计或明确“先规划”的任务时，可调用 `enter_plan_mode` 降权进入 PLAN；此时只暴露读取工具和 `exit_plan_mode`。完成计划后页面显示“执行方案”，但 Agent 仍处于只读状态。只有用户点击执行或明确回复“执行”，才按当前 Composer 权限继续；普通反馈会保持 PLAN 并修订方案。
 
 `AUTO-ACT` 不是“全部允许”。策略有三种结果：`ALLOW`、`ASK`、`DENY`。已识别的 pytest/npm/cargo/go 验证命令和只读 `git status/diff/log/show` 可自动运行；未知命令、shell 包装器仍询问；`git reset --hard`、强制 clean/push、递归强删和关机/格式化类命令直接拒绝。`.env`、私钥、`.git` 和 `.minicodex` 在所有模式下都受保护。
 
@@ -294,14 +297,14 @@ Allow? [y/N]
 ### 本机连续会话模式
 
 ```powershell
-minicodex-web --workspace .\demo\buggy_expense_tracker --mode plan --port 8000
+minicodex-web --workspace .\demo\buggy_expense_tracker --mode auto-act --port 8000
 ```
 
 启动后终端会打印形如 `http://127.0.0.1:8000/?token=...` 的随机会话 URL，请使用这一整条地址。服务端固定绑定 loopback，不提供 `--host` 参数，因此不会直接暴露给局域网或公网。页面关闭不会清空服务端 Session；只要进程未退出，重新打开页面仍能继续使用同一个 Agent 和 Workspace。事件总线保留最近 2,000 个事件，刷新或断线重连后可以重新渲染保留窗口内的执行卡片。
 
 本机服务仍按不可信 HTTP 接口防护：每次启动生成 256-bit 级随机令牌，所有 `/api/*` 与 SSE 请求都必须携带；服务同时拒绝非 loopback `Host`、跨站 `Origin`，并设置 CSP、`no-referrer` 和 `nosniff`。这能阻断普通恶意网页与 DNS rebinding 直接读取事件或替用户批准命令。令牌只应保留在本机终端和地址栏，不要复制到截图、日志或他人可访问的位置；拥有该 URL 的本机进程或浏览器扩展仍应视为拥有本次 Agent 会话权限。
 
-Web 模式依然使用原来的 `AgentSession` 和 `ToolRuntime`。顶部可以在空闲时切换权限模式。PLAN 完成后，结果卡片提供“在 ACT 中实施”和“在 AUTO-ACT 中实施”；点击后不会新建 Session，而是在同一消息历史、已读集合和 Workspace 中追加一条实施指令。一次只接受一个 Prompt，后台单 Worker 串行运行；工具结果和独立 thinking 字段都会同时交给浏览器事件总线与终端打印器。任务完成后，页面把 thinking、工具、Diff 和测试输出折叠，只默认展开最终答案。
+Web 模式继续复用同一个 `AgentSession` 和 `ToolRuntime`。`ACT / AUTO-ACT` 与模型白名单选择器位于底部 Composer；PLAN 是对话中的临时状态，不是第二套工作方式菜单。计划完成后只需点击“执行方案”，系统使用当前执行权限继续同一消息历史、已读集合和 Workspace。一次只接受一个 Prompt，后台单 Worker 串行运行。Web 事件投影会过滤原始 reasoning，把短进展、工具摘要和命令摘要放入折叠区；最终回答和文件变更卡片保持展开，点击文件在右侧查看累计 Diff。
 
 ### SSE 如何工作
 
@@ -309,8 +312,8 @@ Web 模式依然使用原来的 `AgentSession` 和 `ToolRuntime`。顶部可以�
 
 ```text
 id: 17
-event: diff
-data: {"path":"expense_tracker.py","diff":"..."}
+event: file_changed
+data: {"prompt_index":1,"path":"expense_tracker.py","diff":"...","additions":2,"deletions":2}
 ```
 
 SSE 是服务器到浏览器的单向流，适合持续推送 Agent 事件；用户 Prompt 和审批决定则用普通 HTTP POST 反向发送。每个事件有递增 ID，浏览器断线重连时会发送 `Last-Event-ID`，服务端从内存事件总线补发之后的事件。15 秒没有新事件时发送 heartbeat，避免空闲连接被中间层回收。相比 WebSocket，这里无需双向帧协议、连接状态机或额外前端库，代码量更小，也足够支持本项目的实时输出。
@@ -320,11 +323,11 @@ Web API 很小：
 | 路径 | 用途 |
 |---|---|
 | `GET /`、`GET /static/*` | 本机控制台与静态资源 |
-| `GET /api/session?token=...` | 当前会话快照与待审批命令 |
+| `GET /api/session?token=...` | 会话、权限/模型选项、累计文件变化与待审批状态 |
 | `GET /api/events?token=...` | SSE 事件流与断线补发 |
-| `POST /api/prompts?token=...` | 提交下一轮 Prompt；忙碌时返回 409 |
-| `POST /api/mode?token=...` | 空闲时切换 PLAN/ACT/AUTO-ACT |
-| `POST /api/plans/approve?token=...` | 将刚完成的 PLAN 在 ACT 或 AUTO-ACT 中实施 |
+| `POST /api/prompts?token=...` | 提交 Prompt、ACT/AUTO-ACT 与白名单模型；忙碌时返回 409 |
+| `POST /api/mode?token=...` | 兼容接口；新页面只用它更新 ACT/AUTO-ACT |
+| `POST /api/plans/{id}/resolve?token=...` | 执行、修订或取消待审批计划 |
 | `POST /api/approvals/{id}?token=...` | 允许或拒绝当前文件变化/命令 |
 
 ### 具体运行限制
@@ -371,8 +374,8 @@ python -m pytest -q --basetemp=.pytest-tmp
 
 1. `0:00–0:15`：一句话介绍 MiniCodex 和安全边界，展示项目目录与两个失败测试。
 2. `0:15–0:35`：输入 `TASK.md` 中的任务；Agent 先列文件、搜索并读取源码，突出 read-before-edit。
-3. `0:35–0:55`：PLAN 只读定位两个 Bug，并展示只读状态；点击“在 AUTO-ACT 中实施”。
-4. `0:55–1:30`：Agent 精确编辑两个函数，页面展示 unified diff；识别出的 pytest 自动执行。可以快速展示结构化错误回灌与自我纠正。
+3. `0:35–0:55`：Agent 自主进入 PLAN 只读定位两个 Bug；页面明确“批准后使用 AUTO-ACT”，点击“执行方案”。
+4. `0:55–1:30`：Agent 精确编辑两个函数；最终回答下方出现文件卡片，点击后在右侧展示累计 Diff，识别出的 pytest 自动执行。
 5. `1:30–1:50`：看到 `2 passed`，再用一个批量命令完成完整测试与 CLI 冒烟，最终状态显示 `VERIFIED`。
 6. `1:50–2:00`：打开 `.minicodex/sessions/*.jsonl`，点出每个模型回复、工具结果和最终验证状态均可追踪。
 

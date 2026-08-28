@@ -160,7 +160,7 @@ ToolRuntime.last_verification
 → verification / turn_completed 事件
 → EventBus
 → SSE
-→ app.js 更新 #verification-status
+→ codex-app.js 更新 #verification-status
 ```
 
 Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新计算一次，避免刷新后只依赖前端旧状态。
@@ -186,11 +186,11 @@ Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新�
 | OpenAI-compatible Tool Calling | `model_adapter.py::complete` | 解析函数名、call ID 和 JSON 对象参数 | 非瞬时错误上抛给 Agent |
 | 六个核心工具 | `tools.py::TOOL_SCHEMAS/ToolRuntime` | 只允许 Schema 中注册的工具 | `UNKNOWN_TOOL` |
 | Workspace Boundary | `workspace.py::WorkspaceGuard.resolve` | resolve 后必须是 root 的子路径 | `WORKSPACE_VIOLATION` |
-| 三种权限模式 | `permissions.py::PermissionPolicy` | 每个文件变化/命令返回 ALLOW、ASK 或 DENY | 拒绝或进入审批 |
+| 执行权限 + 临时 PLAN | `permissions.py` + `agent.py` | ACT/AUTO-ACT 持久；PLAN 只读覆盖且只能由用户批准退出 | 拒绝或进入审批 |
 | 敏感路径保护 | `permissions.py::is_protected_path` | `.env`、Key、`.git`、Trace 不可枚举/读写 | `PROTECTED_PATH` |
 | Read-before-edit | `tools.py::_require_read` | 已存在文件必须在 `read_paths` | `READ_REQUIRED` |
 | 唯一匹配编辑 | `tools.py::edit_file` | `old_text` 必须恰好出现一次 | `OLD_TEXT_NOT_FOUND` / `AMBIGUOUS_MATCH` |
-| Unified Diff | `write_file/edit_file` | 修改成功后用 `difflib.unified_diff` 计算 | 随 ToolResult 回传 |
+| 累计 Unified Diff | `tools.py::FileChange` | 每 Prompt 固定首次修改前内容，后续只更新最终内容 | 随 ToolResult、快照和 SSE 回传 |
 | argv 批量执行 | `tools.py::run_command` | 整批先校验；每步 `list[str]`、`shell=False`、固定 cwd | 可失败即停止 |
 | 通用副作用确认 | `cli.confirm_action` / `web.ApprovalGate` | ACT 审 Diff/命令；AUTO-ACT 只询问未知风险 | 默认拒绝、超时拒绝 |
 | 统一错误回灌 | `models.py::ToolResult`、`tools.py::execute` | 普通工具异常转换成结构化失败 | Agent 继续下一轮 |
@@ -204,15 +204,15 @@ Web 快照也会在 [`web/session.py`](src/minicodex/web/session.py) 中重新�
 | Mock Model 测试 | `tests/test_agent.py::MockModel` | 固定 ModelReply 序列，无真实 API | 可重复测试状态机 |
 | 连续会话 | `AgentSession.messages` + `WebSession` | 同一对象跨 Prompt 保留消息和工具状态 | 并发 Prompt 返回 409 |
 | SSE 事件流 | `web/events.py` + `web/app.py` | 单调事件 ID、重放、heartbeat | 浏览器自动重连 |
-| PLAN→执行 | `agent.py` + `web/session.py` | 同一 Session 切模式并追加实施 Prompt | 非空闲或非法迁移返回冲突 |
+| PLAN→用户批准→执行 | `agent.py` + `web/session.py` | Agent 可降权规划；只有用户动作恢复当前 ACT/AUTO-ACT | 非空闲、旧 plan ID 或非法迁移返回冲突 |
 | Web 通用审批 | `web/approval.py` | Condition 等待最多 300 秒 | 拒绝、超时或关闭均返回 False |
 | 本机 Web 安全 | `web/app.py`、`web_cli.py` | 127.0.0.1、随机 token、Host/Origin/CSP | HTTP 401/400/403 |
 | 安全 Markdown | `web/static/markdown.js` | DOM API 与 textContent，不用 innerHTML | 非法实体保留为文本 |
-| 轮次折叠 UI | `web/static/app.js` | 当前轮展开，完成后过程折叠 | 历史仍可点击查看 |
+| Codex 式审查 UI | `web/static/codex-app.js` | 历史轮次/过程折叠，最终回答展开，文件点击打开右侧累计 Diff | 快照可恢复变更 |
 
 ## 5. 六个工具逐个看
 
-所有 Schema 定义在 [`tools.py`](src/minicodex/tools.py) 的 `TOOL_SCHEMAS`，会原样传给模型。实际执行统一经过 `ToolRuntime.execute()`，这里负责白名单、参数错误转换、兜底异常和耗时统计。
+六个工作区工具 Schema 定义在 [`tools.py`](src/minicodex/tools.py) 的 `TOOL_SCHEMAS`。`enter_plan_mode / exit_plan_mode` 是 Agent 控制工具，由 `AgentSession` 拦截，不进入普通工具分发。实际文件和命令执行统一经过 `ToolRuntime.execute()`。
 
 ### 5.1 `list_files`
 
@@ -303,15 +303,17 @@ python -m pytest -q && dangerous-command
 
 因为没有 shell 解析，`;`、`&&`、重定向和命令替换不会自动获得特殊语义。批量语义由 Python 循环实现，所以仍能一次 Tool Call 完成“测试成功后再冒烟”。但用户仍需检查未知 argv，因为获准的可执行文件本身可以做任意工作区内外操作；当前权限模式不是 OS 沙箱。
 
-### 6.5 `PLAN / ACT / AUTO-ACT`
+### 6.5 `ACT / AUTO-ACT` 与临时 `PLAN`
 
-[`permissions.py`](src/minicodex/permissions.py) 把模式与风险判断集中到 `PermissionPolicy`，而不是散落在 Prompt 或 UI：
+运行时拆成两个状态：`execution_mode` 持久保存用户选择的 ACT/AUTO-ACT；`plan_state` 保存 `INACTIVE / PLANNING / WAITING_APPROVAL`。只要 PLAN 未结束，ToolRuntime 的有效权限就是只读 PLAN：
 
 | 模式 | 文件变化 | 命令 |
 |---|---|---|
 | PLAN | 拒绝；模型也看不到 write/edit/run schema | 全部拒绝 |
 | ACT | 先把 Diff 交给 approver | 每一步把 argv 交给 approver |
 | AUTO-ACT | 普通工作区文件允许，敏感路径拒绝 | 验证/只读 Git 允许，未知询问，危险操作拒绝 |
+
+模型可以调用 `enter_plan_mode` 主动降低权限；`exit_plan_mode` 必须提交完整 Markdown 计划，但只会进入 `WAITING_APPROVAL`，不会恢复写工具。WebSession 收到用户的执行动作后才把 `plan_state` 设回 `INACTIVE`。用户给修改意见时则回到 `PLANNING`，继续只读。
 
 敏感路径规则同时用于直接读写和递归枚举，避免模型通过 `list_files` 或 `search_text` 间接看到 `.env`。`.env.example` 只作为公开配置模板例外。危险命令的显式 deny 优先于模式便利性。
 
@@ -333,7 +335,7 @@ ok / tool / call_id / summary / data / error / meta
 
 ### 7.1 `SYSTEM_PROMPT`
 
-只放高层行为约束，不承担安全判定。PLAN 会追加只读提示，并且 `_tool_schemas()` 只返回 list/search/read；真正安全边界仍在 ToolRuntime、WorkspaceGuard 和 PermissionPolicy，即使模型伪造调用也会被拒绝。
+只放高层行为约束，不承担安全判定。Prompt 要求跟随用户语言、工具前最多给一句短进展，并在解释/诊断/设计任务中自主进入 PLAN。PLAN 会追加只读提示，`_tool_schemas()` 只返回 list/search/read 与 `exit_plan_mode`；真正边界仍在 ToolRuntime、WorkspaceGuard 和 PermissionPolicy。
 
 ### 7.2 `Model` Protocol、`ToolCall`、`ModelReply`
 
@@ -352,7 +354,9 @@ complete(messages, tools) -> ModelReply
 - `messages`：system message 加所有历史对话；
 - `tools`：其中包含 read 集合、修改序号和验证证据；
 - `prompt_count`：连续会话的用户轮次；
-- `mode`：与 ToolRuntime 同步的当前权限模式；
+- `execution_mode`：用户持续选择的 ACT/AUTO-ACT；
+- `plan_state`：临时规划阶段；两者共同计算 ToolRuntime 的有效模式；
+- `pending_plan_text`：模型通过 `exit_plan_mode(plan=...)` 提交、等待用户批准的计划；
 - Trace、终端回调和 Web 事件回调。
 
 ### 7.4 `run_turn()`
@@ -398,7 +402,7 @@ OpenAI Tool Calling 协议要求 assistant 发出的每个 tool call 都有对�
 extra_body={"enable_thinking": True, "preserve_thinking": False}
 ```
 
-当前请求是非流式，适配器分别读取 `message.reasoning_content`、`message.content` 和 `message.tool_calls`，转换成内部 `ModelReply`。reasoning 通过独立 `model_reasoning` 事件进入终端、Web 执行过程和 JSONL Trace，不会拼接进最终 `content`。因此最终答案仍保持干净；任务结束后，前端会把 thinking 连同工具、Diff 和测试输出一起折叠。
+当前请求是非流式，适配器分别读取 `message.reasoning_content`、`message.content` 和 `message.tool_calls`。原始 reasoning 进入终端 `[thinking:turn N]` 与 JSONL Trace，但 `web_cli.publish_agent_event()` 会过滤它，不发送给普通 Web UI。Web 只接收 Tool Call 前的短 `content` 作为 `progress`，以及由代码生成的 `tool_summary / command_summary`。最终答案仍来自 `message.content`。
 
 这里显式关闭 `preserve_thinking`：当前轮仍会思考并返回 reasoning，但后续请求不需要完整回传历史 reasoning。这样与 MiniCodex 的确定性历史压缩兼容，也避免思考内容快速增加上下文成本。如果未来开启 preserved thinking，就必须完整、原样、按顺序保存并回传供应商特有字段，不能把它拼到 `content`。
 
@@ -479,7 +483,7 @@ WebSession
 FastAPI app
 ```
 
-终端输出仍通过 `on_tool_result=print_tool_result` 保留；同一个结果还通过 `on_event=events.publish` 进入前端。
+终端输出仍通过 `on_tool_result=print_tool_result` 和 `print_agent_event` 保留；Web 事件先经过 `publish_agent_event()` 投影，过滤 reasoning 和低层噪声，再进入 EventBus。
 
 ## 12. Web 连续会话、SSE 与审批
 
@@ -491,7 +495,9 @@ FastAPI app
 - 每个 Prompt 使用一个后台线程；
 - 线程执行完成后回到 `IDLE`；
 - 同一个 `AgentSession`、messages、ToolRuntime 和 Workspace 一直复用。
-- 只允许在 IDLE 时切换模式；PLAN 结果可以在同一 Session 中批准到 ACT 或 AUTO-ACT 执行。
+- 只允许在空闲时切换 ACT/AUTO-ACT；等待 PLAN 批准时切换执行权限不会退出只读状态；
+- 保存 `PendingPlan`，支持 execute/revise/cancel，并用 plan ID 拒绝重复或过期操作；
+- 快照包含允许模型、执行权限、Plan 状态、待审批计划和累计文件变化。
 
 所以“多轮”不是多个 Agent，而是同一个 Agent Session 连续接收多个用户指令。
 
@@ -505,8 +511,8 @@ FastAPI app
 
 ```text
 id: 17
-event: diff
-data: {"path":"app.py","diff":"..."}
+event: file_changed
+data: {"prompt_index":2,"path":"app.py","diff":"...","additions":1,"deletions":1}
 ```
 
 SSE 只负责服务器到浏览器；Prompt 和审批决定仍用 HTTP POST。15 秒无事件时发送 heartbeat。浏览器自动带 `Last-Event-ID` 重连，服务端从下一个事件继续。
@@ -539,21 +545,21 @@ FastAPI 中间件要求：
 
 前端没有框架，位于 [`web/static/`](src/minicodex/web/static)。
 
-- `index.html`：顶部 Session 状态、Workspace、执行区域、Prompt 输入框和审批 Dialog。
-- `app.css`：终端式视觉、固定顶部栏、轮次折叠、Diff 和 Markdown 样式。
+- `index.html`：轻量顶栏、对话主栏、右侧审查区、Composer 和审批 Dialog。
+- `codex-app.css`：Codex 式信息层级、固定 Composer、桌面分栏和窄屏 Diff 抽屉。
 - `markdown.js`：小型安全 Markdown 渲染器。
-- `app.js`：HTTP、EventSource、事件分组、审批和 DOM 更新。
+- `codex-app.js`：HTTP、EventSource、对话状态、计划卡片、累计 Diff 和审批。
 
-`app.js` 的阅读顺序：
+`codex-app.js` 的阅读顺序：
 
-1. `setStatus()/setModeUI()`：控制输入框、当前模式和 PLAN 只读状态；
-2. `beginTurn()`：新 Prompt 创建轮次组并折叠上一轮；
-3. `addCard()/addCompactLine()`：渲染 Diff、命令、错误和简洁工具行；
-4. `completeTurn()`：折叠执行过程，只展开最终 Markdown；
-5. `handlers`：把 `model_reasoning` 渲染为 `THINKING · TURN N`，并映射其他 SSE 事件；
-6. `loadSnapshot()`：刷新时恢复模式、状态和 pending approval；
-7. `connectEvents()`：建立 SSE；
-8. `submitPrompt()/decideApproval()/changeMode()/approvePlan()`：浏览器到服务器的 POST 方向。
+1. `setStatus()/setVerification()`：控制 Composer 与状态；
+2. `createTurn()/addProgress()/addActivity()`：构建当前对话与折叠过程；
+3. `rememberChange()/renderChanges()`：按 Prompt 汇总文件卡片；
+4. `openReview()/renderReview()`：打开右侧 Diff 并逐行着色；
+5. `renderFinal()/renderPlan()`：展示最终 Markdown 或待批准方案；
+6. `handlers/handleEvent()`：只映射产品事件；没有 `model_reasoning` handler；
+7. `loadSnapshot()/connectEvents()`：刷新恢复与 SSE；
+8. `submitPrompt()/resolvePlan()/decideApproval()`：HTTP POST 方向。
 
 Markdown 渲染只用 `createElement`、`createTextNode`、`textContent` 和 `replaceChildren`，不把模型输出交给 `innerHTML`。因此 `<script>` 只会显示成文本。
 
@@ -570,6 +576,7 @@ Markdown 渲染只用 `createElement`、`createTextNode`、`textContent` 和 `re
 - `MINICODEX_API_KEY`；
 - `DASHSCOPE_API_KEY`；
 - `MINICODEX_MODEL`；
+- `MINICODEX_MODELS`：逗号分隔的 Web 模型白名单，默认模型会自动放在首位；
 - `MINICODEX_BASE_URL`；
 - `MINICODEX_ENABLE_THINKING`。
 
@@ -609,7 +616,7 @@ Mock Model 的核心思想是预先给出固定 `ModelReply` 列表：第一次�
 8. [`session.py`](src/minicodex/session.py)：看审计记录。
 9. [`cli.py`](src/minicodex/cli.py)：看单轮组装。
 10. `web/events.py` → `web/approval.py` → `web/session.py` → `web/app.py`：看 Web 编排。
-11. `web/static/app.js`：最后看展示层如何消费事件。
+11. `web/static/codex-app.js`：最后看展示层如何消费产品事件并打开右侧 Diff。
 12. 对照 `tests/`，确认每项约束是否真的由测试保护。
 
 ## 17. 老师可能追问

@@ -1,20 +1,20 @@
 # 四轮连续会话 Demo
 
-先从仓库根目录启动只读计划模式：
+先从仓库根目录以 AUTO-ACT 执行权限启动：
 
 ```powershell
-minicodex-web --workspace .\demo\buggy_expense_tracker --mode plan
+minicodex-web --workspace .\demo\buggy_expense_tracker --mode auto-act
 ```
 
-在同一个页面依次发送下面四条 Prompt。不要重启服务；这样可以直接展示同一个 Agent Session 保留了历史对话、已读文件集合和工作区修改状态。第 1 轮先在 PLAN 中完成只读定位，再点击最终结果下方的“在 AUTO-ACT 中实施”，展示同一 Session 从计划切到受控自动执行。
+在同一个页面依次发送下面四条 Prompt。不要重启服务；这样可以展示同一个 Agent Session 保留历史对话、已读文件集合和工作区修改状态。Composer 中的 AUTO-ACT 是持续执行权限；Agent 判断需要先分析时会临时进入只读 PLAN，完成后点击“执行方案”，仍按 AUTO-ACT 继续。
 
 ## 第 1 轮：定位并修复真实 Bug
 
 ```text
-先运行测试，定位两个失败用例的原因，用最小改动修复 Bug，然后重新运行测试验证。请不要修改现有测试。
+先只读分析两个失败用例，给出最小修复方案，不要修改文件。方案确认后再实现并运行测试验证，不要修改现有测试。
 ```
 
-预期看点：PLAN 只暴露读取工具；批准后 AUTO-ACT 自动应用普通工作区 Diff、自动运行识别出的 pytest，最后得到 `2 passed` 和 `VERIFIED`。若 Agent 提议未知命令，仍会弹出审批。
+预期看点：Agent 自主进入 PLAN 后只暴露读取工具；计划卡片提示“批准后使用 AUTO-ACT”，点击“执行方案”才恢复写权限。完成后最终回答下方出现文件卡片，点击在右侧查看累计 Diff，并得到 `2 passed` 与 `VERIFIED`。
 
 ## 第 2 轮：添加新功能
 
@@ -42,8 +42,8 @@ minicodex-web --workspace .\demo\buggy_expense_tracker --mode plan
 
 ## 两分钟录屏建议
 
-- 0:00–0:15：展示页面顶栏中的本机 Workspace、模型、PLAN 和 IDLE 状态。
-- 0:15–0:55：完整展示第 1 轮；只读计划、切换 AUTO-ACT、Diff、自动验证是核心镜头。
+- 0:00–0:15：展示本机 Workspace、Composer 中的 AUTO-ACT 与模型选择器。
+- 0:15–0:55：完整展示第 1 轮；Agent 自主进入 PLAN、用户批准、右侧累计 Diff 和自动验证是核心镜头。
 - 0:55–1:30：第 2、3 轮可在模型等待处加速，只保留 Prompt、关键 Diff 和测试通过画面。
 - 1:30–1:50：发送第 4 轮，展示完整回归与 Agent 的四项总结。
 - 1:50–2:00：快速切到终端输出和 `.minicodex/sessions/*.jsonl`，说明网页、终端、Trace 是同一次执行的三个视角。
