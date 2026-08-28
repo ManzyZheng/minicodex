@@ -10,7 +10,7 @@ import pytest
 NODE = shutil.which("node")
 ROOT = Path(__file__).parents[1]
 TEST_SCRIPT = ROOT / "tests" / "js" / "turn_timeline_test.cjs"
-APP_SCRIPT = ROOT / "src" / "minicodex" / "web" / "static" / "app.js"
+APP_SCRIPT = ROOT / "src" / "minicodex" / "web" / "static" / "codex-app.js"
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is optional and unavailable")

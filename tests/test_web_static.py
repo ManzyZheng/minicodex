@@ -24,18 +24,21 @@ def test_root_serves_the_web_console_and_assets() -> None:
     client = TestClient(create_app(StubSession(), access_token="test-token"), base_url="http://127.0.0.1")
 
     page = client.get("/")
-    stylesheet = client.get("/static/app.css")
+    stylesheet = client.get("/static/codex-app.css")
     markdown = client.get("/static/markdown.js")
-    script = client.get("/static/app.js")
+    script = client.get("/static/codex-app.js")
 
     assert page.status_code == 200
-    assert 'id="timeline"' in page.text
+    assert 'id="conversation"' in page.text
+    assert 'id="review-panel"' in page.text
+    assert 'id="review-diff"' in page.text
     assert 'id="prompt-input"' in page.text
     assert 'id="approval-dialog"' in page.text
-    assert 'id="mode-select"' in page.text
+    assert 'id="permission-select"' in page.text
+    assert 'id="model-select"' in page.text
     assert 'id="approval-title"' in page.text
     assert stylesheet.status_code == 200
-    assert "--color-ink" in stylesheet.text
+    assert "--ink" in stylesheet.text
     assert markdown.status_code == 200
     assert "renderMarkdown" in markdown.text
     assert script.status_code == 200
@@ -44,6 +47,6 @@ def test_root_serves_the_web_console_and_assets() -> None:
 
 def test_frontend_does_not_insert_untrusted_event_html() -> None:
     static_dir = Path(__file__).parents[1] / "src" / "minicodex" / "web" / "static"
-    for script_name in ("app.js", "markdown.js"):
+    for script_name in ("codex-app.js", "markdown.js"):
         source = (static_dir / script_name).read_text(encoding="utf-8")
         assert ".innerHTML" not in source

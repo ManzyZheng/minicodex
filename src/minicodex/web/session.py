@@ -106,7 +106,17 @@ class WebSession:
         with self._condition:
             if self._status != "IDLE":
                 raise SessionBusyError("mode can only change while the Agent is idle")
-            self.agent.set_mode(mode)
+            if mode is AgentMode.PLAN:
+                self.agent.set_mode(mode)
+            else:
+                self.agent.set_execution_mode(mode)
+                if self._pending_plan is not None:
+                    self._pending_plan = PendingPlan(
+                        self._pending_plan.id,
+                        self._pending_plan.text,
+                        mode.value,
+                    )
+                    self.events.publish("plan_ready", asdict(self._pending_plan))
         return mode
 
     def approve_plan(self, mode: AgentMode) -> None:

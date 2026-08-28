@@ -3,37 +3,41 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MiniCodex · Local Agent Console</title>
-  <link rel="stylesheet" href="/static/app.css?v=permissions-1">
+  <title>MiniCodex · 本地代码 Agent</title>
+  <link rel="stylesheet" href="/static/codex-app.css?v=codex-ui-1">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="brand-mark">MC</span><div><strong>MiniCodex</strong><span>LOCAL AGENT CONSOLE</span></div></div>
-    <dl class="session-facts">
-      <div><dt>STATUS</dt><dd id="session-status" class="status-pill">CONNECTING</dd></div>
-      <div><dt>MODE</dt><dd><select id="mode-select" aria-label="Agent 权限模式"><option value="plan">PLAN · READ ONLY</option><option value="act" selected>ACT · REVIEW</option><option value="auto-act">AUTO-ACT · AUTONOMOUS</option></select></dd></div>
-      <div><dt>MODEL</dt><dd id="model-name">—</dd></div>
-      <div><dt>VERIFIED</dt><dd id="verification-status">NOT_RUN</dd></div>
-    </dl>
+    <div class="brand"><span class="brand-mark">M</span><div><strong>MiniCodex</strong><span id="workspace-name">本地工作区</span></div></div>
+    <div class="top-status"><code id="workspace-path">正在连接…</code><span id="session-status" class="status-pill">CONNECTING</span><span id="verification-status">NOT_RUN</span></div>
   </header>
-  <main class="shell">
-    <section class="workspace-strip" aria-label="当前工作区"><span>WORKSPACE</span><code id="workspace-path">正在连接本机会话…</code></section>
-    <section class="run-panel" aria-labelledby="run-heading">
-      <div class="section-heading"><div><span class="eyebrow">LIVE AGENT SESSION</span><h1 id="run-heading">当前任务与历史</h1></div><p>当前轮实时展开 · 历史轮按需查看</p></div>
-      <div id="timeline" class="timeline" aria-live="polite">
-        <article id="empty-state" class="empty-state"><span class="empty-index">00</span><div><h2>等待第一条任务</h2><p>当前轮会展示推理与执行过程；完成后只展开最终结果。</p></div></article>
+  <main id="app-layout" class="app-layout">
+    <section class="conversation-pane" aria-label="Agent 对话">
+      <div id="conversation" class="conversation" aria-live="polite">
+        <article id="empty-state" class="empty-state"><div class="empty-mark">M</div><h1>开始一个代码任务</h1><p>让 MiniCodex 检查代码、修改文件并运行验证。过程会自动折叠，最终结果保持清晰。</p></article>
       </div>
+      <form id="prompt-form" class="composer">
+        <textarea id="prompt-input" rows="3" maxlength="20000" aria-label="给 MiniCodex 的指令" placeholder="给 MiniCodex 一条指令…"></textarea>
+        <div class="composer-bar">
+          <div class="composer-options">
+            <select id="permission-select" aria-label="执行权限"><option value="act">ACT</option><option value="auto-act">AUTO-ACT</option></select>
+            <select id="model-select" aria-label="模型"></select>
+          </div>
+          <span class="shortcut">Enter 发送 · Shift+Enter 换行</span>
+          <button id="send-button" type="submit" aria-label="发送指令">↑</button>
+        </div>
+      </form>
     </section>
+    <aside id="review-panel" class="review-panel" aria-label="代码变更审查" hidden>
+      <header class="review-header"><div><span>代码变更</span><strong id="review-title">选择文件</strong></div><button id="close-review" class="icon-button" type="button" aria-label="关闭代码审查">×</button></header>
+      <nav id="review-file-list" class="review-file-list" aria-label="已编辑文件"></nav>
+      <div id="review-diff" class="review-diff" tabindex="0"></div>
+    </aside>
   </main>
-  <form id="prompt-form" class="composer">
-    <label for="prompt-input">NEXT INSTRUCTION</label>
-    <textarea id="prompt-input" rows="3" maxlength="20000" placeholder="例如：检查测试失败，定位并修复 Bug，然后运行测试验证。"></textarea>
-    <div class="composer-actions"><span>Enter 发送 · Shift+Enter 换行</span><button id="send-button" type="submit">运行任务 →</button></div>
-  </form>
   <dialog id="approval-dialog" class="approval-dialog">
-    <form method="dialog"><span class="eyebrow warning">SIDE EFFECT REVIEW</span><h2 id="approval-title">允许 Agent 执行此操作？</h2><p id="approval-purpose"></p><pre><code id="approval-command"></code></pre><p id="approval-timeout" class="muted"></p><div class="approval-actions"><button id="reject-command" type="button" class="secondary">拒绝</button><button id="allow-command" type="button">允许一次</button></div></form>
+    <form method="dialog"><span class="dialog-kicker">需要确认</span><h2 id="approval-title">允许 Agent 执行此操作？</h2><p id="approval-purpose"></p><pre><code id="approval-command"></code></pre><p id="approval-timeout" class="muted"></p><div class="approval-actions"><button id="reject-command" type="button" class="secondary">拒绝</button><button id="allow-command" type="button">允许一次</button></div></form>
   </dialog>
   <script src="/static/markdown.js?v=markdown-1" defer></script>
-  <script src="/static/app.js?v=permissions-1" defer></script>
+  <script src="/static/codex-app.js?v=codex-ui-1" defer></script>
 </body>
 </html>

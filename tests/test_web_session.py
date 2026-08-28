@@ -175,3 +175,17 @@ def test_session_snapshot_restores_cumulative_file_changes(tmp_path) -> None:
     assert snapshot["file_changes"][0]["path"] == "app.py"
     assert snapshot["file_changes"][0]["prompt_index"] == 1
     assert "+value = 2" in snapshot["file_changes"][0]["diff"]
+
+
+def test_changing_execution_permission_while_plan_waits_does_not_exit_plan(tmp_path) -> None:
+    web = make_web_session(tmp_path, ReplyModel([]), mode=AgentMode.ACT)
+    web.agent.enter_plan_mode("enter")
+    plan = web.mark_plan_ready("计划")
+
+    web.set_mode(AgentMode.AUTO_ACT)
+
+    assert web.agent.execution_mode is AgentMode.AUTO_ACT
+    assert web.agent.plan_state is PlanState.WAITING_APPROVAL
+    assert web.agent.tools.mode is AgentMode.PLAN
+    assert web.snapshot()["pending_plan"]["id"] == plan.id
+    assert web.snapshot()["pending_plan"]["execution_mode"] == "auto-act"
