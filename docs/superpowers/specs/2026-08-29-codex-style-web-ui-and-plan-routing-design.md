@@ -1,7 +1,7 @@
 # MiniCodex Codex 式 Web UI 与自主 Plan 路由设计
 
 日期：2026-08-29
-状态：待用户文档审阅
+状态：已批准，待实现
 
 ## 1. 目标
 
@@ -229,7 +229,7 @@ else:
 
 ```json
 {"name": "enter_plan_mode", "parameters": {}}
-{"name": "exit_plan_mode", "parameters": {}}
+{"name": "exit_plan_mode", "parameters": {"plan": "完整 Markdown 计划"}}
 ```
 
 它们由 AgentSession 拦截，不进入 ToolRuntime 的普通文件/命令分发。
@@ -245,7 +245,8 @@ else:
 `exit_plan_mode`：
 
 - 不直接恢复写权限；
-- 把当前计划作为 `plan_ready` 事件提交给 WebSession；
+- 要求模型通过必填 `plan` 参数提交完整 Markdown 计划，不依赖解析普通回复文本；
+- 把该计划作为 `plan_ready` 事件提交给 WebSession；
 - 把 `plan_state` 设为 `WAITING_APPROVAL`；
 - 显示“批准后将使用当前 ACT/AUTO-ACT 执行”；
 - 用户点击“执行方案”或提交明确的“执行”后，把 `plan_state` 设为 `INACTIVE` 并继续同一 Session；
