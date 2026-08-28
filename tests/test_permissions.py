@@ -1,6 +1,14 @@
 from pathlib import Path
 
-from minicodex.permissions import AgentMode, PermissionAction, PermissionPolicy
+from minicodex.permissions import AgentMode, PermissionAction, PermissionPolicy, PlanState
+
+
+def test_plan_state_is_separate_from_persistent_execution_mode() -> None:
+    assert {state.value for state in PlanState} == {
+        "inactive",
+        "planning",
+        "waiting_approval",
+    }
 
 
 def test_plan_denies_mutations_while_act_asks_and_auto_act_allows(tmp_path: Path) -> None:

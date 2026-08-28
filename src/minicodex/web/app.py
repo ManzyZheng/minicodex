@@ -5,6 +5,7 @@ import hmac
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -13,7 +14,7 @@ from pydantic import BaseModel
 
 from ..permissions import AgentMode
 from .events import WebEvent
-from .session import SessionBusyError, WebSession
+from .session import PlanResolutionError, SessionBusyError, WebSession
 
 
 class PromptRequest(BaseModel):
@@ -26,6 +27,11 @@ class ApprovalDecision(BaseModel):
 
 class ModeRequest(BaseModel):
     mode: AgentMode
+
+
+class PlanResolutionRequest(BaseModel):
+    action: Literal["execute", "revise", "cancel"]
+    feedback: str | None = None
 
 
 def format_sse_event(event: WebEvent) -> str:
@@ -99,6 +105,16 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"status": "accepted", "mode": body.mode.value}
+
+    @app.post("/api/plans/{plan_id}/resolve", status_code=status.HTTP_202_ACCEPTED)
+    def resolve_plan(plan_id: str, body: PlanResolutionRequest) -> dict[str, str]:
+        try:
+            web_session.resolve_plan(plan_id, body.action, body.feedback)
+        except (SessionBusyError, PlanResolutionError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"status": "accepted", "action": body.action}
 
     @app.post("/api/approvals/{request_id}")
     def resolve_approval(request_id: str, body: ApprovalDecision) -> dict[str, str]:

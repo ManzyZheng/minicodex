@@ -12,6 +12,12 @@ class AgentMode(str, Enum):
     AUTO_ACT = "auto-act"
 
 
+class PlanState(str, Enum):
+    INACTIVE = "inactive"
+    PLANNING = "planning"
+    WAITING_APPROVAL = "waiting_approval"
+
+
 class PermissionAction(str, Enum):
     ALLOW = "allow"
     ASK = "ask"

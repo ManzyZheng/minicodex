@@ -7,7 +7,7 @@ from pathlib import Path
 from minicodex.agent import Agent, AgentSession, StopReason
 from minicodex.context import compact_messages, serialize_tool_result, truncate_text
 from minicodex.models import ModelReply, ToolCall
-from minicodex.permissions import AgentMode
+from minicodex.permissions import AgentMode, PlanState
 from minicodex.session import SessionTrace
 from minicodex.tools import ToolRuntime
 
@@ -255,9 +255,54 @@ def test_plan_mode_exposes_only_read_tools_and_injects_read_only_prompt(tmp_path
     session.run_turn("design the change")
 
     names = {schema["function"]["name"] for schema in model.tools_seen[0]}
-    assert names == {"list_files", "search_text", "read_file"}
+    assert names == {"list_files", "search_text", "read_file", "exit_plan_mode"}
     assert "PLAN MODE" in model.messages_seen[0][0]["content"]
     assert "read-only" in model.messages_seen[0][0]["content"]
+
+
+def test_plan_overlay_keeps_selected_auto_act_mode(tmp_path: Path) -> None:
+    runtime = ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT)
+    session = AgentSession(MockModel([]), runtime)
+
+    result = session.enter_plan_mode("enter")
+
+    assert result.ok
+    assert session.execution_mode is AgentMode.AUTO_ACT
+    assert session.plan_state is PlanState.PLANNING
+    assert runtime.mode is AgentMode.PLAN
+
+
+def test_plan_tools_allow_read_and_exit_control_only(tmp_path: Path) -> None:
+    session = AgentSession(
+        MockModel([]),
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.ACT),
+    )
+    session.enter_plan_mode("enter")
+
+    schemas = {schema["function"]["name"]: schema for schema in session._tool_schemas()}
+
+    assert set(schemas) == {"list_files", "search_text", "read_file", "exit_plan_mode"}
+    exit_parameters = schemas["exit_plan_mode"]["function"]["parameters"]
+    assert exit_parameters["required"] == ["plan"]
+
+
+def test_model_can_enter_plan_without_calling_workspace_runtime(tmp_path: Path) -> None:
+    model = MockModel([
+        ModelReply(tool_calls=[ToolCall("plan", "enter_plan_mode", {})]),
+        ModelReply(content="我先只读检查相关代码。"),
+    ])
+    session = AgentSession(
+        model,
+        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT),
+    )
+
+    outcome = session.run_turn("先分析这个改动")
+
+    assert outcome.stop_reason is StopReason.COMPLETED
+    assert session.execution_mode is AgentMode.AUTO_ACT
+    assert session.plan_state is PlanState.PLANNING
+    tool_message = next(message for message in session.messages if message.get("tool_call_id") == "plan")
+    assert "UNKNOWN_TOOL" not in tool_message["content"]
 
 
 def test_agent_emits_each_batch_command_output_separately(tmp_path: Path) -> None:

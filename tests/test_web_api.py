@@ -88,3 +88,44 @@ def test_mode_endpoint_updates_session_and_rejects_invalid_mode(tmp_path) -> Non
     assert changed.json() == {"mode": "plan"}
     assert session.agent.tools.mode is AgentMode.PLAN
     assert client.post(api(client, "/api/mode"), json={"mode": "yolo"}).status_code == 422
+
+
+def test_plan_resolve_endpoint_executes_current_permission_mode(tmp_path) -> None:
+    client, session, model = make_client(tmp_path)
+    session.set_mode(AgentMode.AUTO_ACT)
+    session.agent.enter_plan_mode("enter")
+    plan = session.mark_plan_ready("先修改，再验证")
+
+    snapshot = client.get(api(client, "/api/session")).json()
+    assert snapshot["execution_mode"] == "auto-act"
+    assert snapshot["plan_state"] == "waiting_approval"
+    assert snapshot["pending_plan"]["id"] == plan.id
+
+    response = client.post(
+        api(client, f"/api/plans/{plan.id}/resolve"),
+        json={"action": "execute"},
+    )
+
+    assert response.status_code == 202
+    assert model.started.wait(0.5)
+    model.release.set()
+    assert session.wait_until_idle(1.0)
+    assert session.agent.execution_mode is AgentMode.AUTO_ACT
+
+
+def test_plan_resolve_endpoint_rejects_invalid_action_and_stale_id(tmp_path) -> None:
+    client, session, _model = make_client(tmp_path)
+    session.agent.enter_plan_mode("enter")
+    plan = session.mark_plan_ready("计划")
+
+    invalid = client.post(
+        api(client, f"/api/plans/{plan.id}/resolve"),
+        json={"action": "launch"},
+    )
+    stale = client.post(
+        api(client, "/api/plans/stale/resolve"),
+        json={"action": "cancel"},
+    )
+
+    assert invalid.status_code == 422
+    assert stale.status_code == 409

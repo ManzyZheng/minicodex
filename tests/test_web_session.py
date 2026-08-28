@@ -6,7 +6,7 @@ import pytest
 
 from minicodex.agent import AgentSession
 from minicodex.models import ModelReply
-from minicodex.permissions import AgentMode
+from minicodex.permissions import AgentMode, PlanState
 from minicodex.tools import ToolRuntime
 from minicodex.web.approval import ApprovalGate
 from minicodex.web.events import EventBus
@@ -32,10 +32,10 @@ class BlockingModel:
         return ModelReply(content="done")
 
 
-def make_web_session(tmp_path, model) -> WebSession:
+def make_web_session(tmp_path, model, *, mode: AgentMode = AgentMode.ACT) -> WebSession:
     events = EventBus()
     approvals = ApprovalGate(events, wait_timeout=0.2)
-    runtime = ToolRuntime(tmp_path, approver=approvals.request)
+    runtime = ToolRuntime(tmp_path, approver=approvals.request, mode=mode)
     agent = AgentSession(model, runtime, on_event=events.publish)
     return WebSession(
         agent,
@@ -113,3 +113,50 @@ def test_approving_plan_switches_mode_and_continues_same_session(tmp_path) -> No
         message.get("role") == "user" and "approved plan" in str(message.get("content", "")).lower()
         for message in web.agent.messages
     )
+
+
+def test_execute_pending_plan_uses_existing_auto_act_mode(tmp_path) -> None:
+    web = make_web_session(
+        tmp_path,
+        ReplyModel([ModelReply(content="implemented")]),
+        mode=AgentMode.AUTO_ACT,
+    )
+    web.agent.enter_plan_mode("enter")
+    plan = web.mark_plan_ready("先修改实现，再运行测试")
+
+    web.resolve_plan(plan.id, "execute")
+
+    assert web.wait_until_idle(1.0)
+    assert web.agent.execution_mode is AgentMode.AUTO_ACT
+    assert web.agent.plan_state is PlanState.INACTIVE
+    assert web.snapshot()["pending_plan"] is None
+
+
+def test_plan_feedback_stays_read_only_and_reenters_agent(tmp_path) -> None:
+    web = make_web_session(
+        tmp_path,
+        ReplyModel([ModelReply(content="revised plan")]),
+        mode=AgentMode.AUTO_ACT,
+    )
+    web.agent.enter_plan_mode("enter")
+    plan = web.mark_plan_ready("原计划")
+
+    web.resolve_plan(plan.id, "revise", "保持旧 API 兼容")
+
+    assert web.wait_until_idle(1.0)
+    assert web.agent.execution_mode is AgentMode.AUTO_ACT
+    assert web.agent.plan_state is PlanState.PLANNING
+    assert web.agent.tools.mode is AgentMode.PLAN
+    assert any(message.get("content") == "保持旧 API 兼容" for message in web.agent.messages)
+
+
+def test_cancel_plan_returns_idle_without_starting_implementation(tmp_path) -> None:
+    web = make_web_session(tmp_path, ReplyModel([]), mode=AgentMode.ACT)
+    web.agent.enter_plan_mode("enter")
+    plan = web.mark_plan_ready("原计划")
+
+    web.resolve_plan(plan.id, "cancel")
+
+    assert web.snapshot()["status"] == "IDLE"
+    assert web.agent.plan_state is PlanState.INACTIVE
+    assert web.agent.prompt_count == 0

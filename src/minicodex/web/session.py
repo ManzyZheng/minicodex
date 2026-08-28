@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import threading
+import uuid
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..agent import AgentSession
-from ..permissions import AgentMode
+from ..permissions import AgentMode, PlanState
 from .approval import ApprovalGate
 from .events import EventBus
 
 
 class SessionBusyError(RuntimeError):
     pass
+
+
+class PlanResolutionError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class PendingPlan:
+    id: str
+    text: str
+    execution_mode: str
 
 
 class WebSession:
@@ -35,6 +48,7 @@ class WebSession:
         self._status = "IDLE"
         self._closed = False
         self._worker: threading.Thread | None = None
+        self._pending_plan: PendingPlan | None = None
         self.events.publish(
             "session_started",
             {
@@ -42,6 +56,8 @@ class WebSession:
                 "model": self.model_name,
                 "max_turns_per_prompt": self.max_turns_per_prompt,
                 "mode": self.agent.tools.mode.value,
+                "execution_mode": self.agent.execution_mode.value,
+                "plan_state": self.agent.plan_state.value,
             },
         )
 
@@ -65,12 +81,17 @@ class WebSession:
                 break
         if pending is not None:
             status = "WAITING_APPROVAL"
+        elif self._pending_plan is not None:
+            status = "WAITING_PLAN_APPROVAL"
         return {
             "workspace": str(self.workspace),
             "model": self.model_name,
             "status": status,
             "verification_status": self._verification_status(),
             "mode": self.agent.tools.mode.value,
+            "execution_mode": self.agent.execution_mode.value,
+            "plan_state": self.agent.plan_state.value,
+            "pending_plan": asdict(self._pending_plan) if self._pending_plan else None,
             "max_turns_per_prompt": self.max_turns_per_prompt,
             "prompt_count": self.agent.prompt_count,
             "event_id": event_id,
@@ -93,8 +114,62 @@ class WebSession:
                 raise SessionBusyError("the Agent must be idle before approving a plan")
             if self.agent.tools.mode is not AgentMode.PLAN:
                 raise ValueError("the session is not in Plan Mode")
-            self.agent.set_mode(mode)
+            self.agent.execution_mode = mode
+            if self._pending_plan is not None:
+                plan = self._pending_plan
+                self._pending_plan = None
+                self.agent.resume_plan(execute=True)
+                prompt = f"{prompt}\n\nApproved plan:\n{plan.text}"
+            else:
+                self.agent.set_mode(mode)
             self._start_prompt_locked(prompt)
+
+    def mark_plan_ready(self, text: str) -> PendingPlan:
+        if self.agent.plan_state is PlanState.PLANNING:
+            result = self.agent.request_plan_approval("web-plan", text)
+            if not result.ok:
+                raise ValueError(result.summary)
+        elif self.agent.plan_state is not PlanState.WAITING_APPROVAL:
+            raise ValueError("the session is not in Plan Mode")
+        plan_text = (self.agent.pending_plan_text or text).strip()
+        plan = PendingPlan(uuid.uuid4().hex, plan_text, self.agent.execution_mode.value)
+        with self._condition:
+            self._pending_plan = plan
+        self.events.publish("plan_ready", asdict(plan))
+        return plan
+
+    def resolve_plan(
+        self,
+        plan_id: str,
+        action: Literal["execute", "revise", "cancel"],
+        feedback: str | None = None,
+    ) -> None:
+        with self._condition:
+            if self._status != "IDLE":
+                raise SessionBusyError("the Agent must be idle before resolving a plan")
+            plan = self._pending_plan
+            if plan is None or plan.id != plan_id:
+                raise PlanResolutionError("plan is missing, stale, or already resolved")
+            self._pending_plan = None
+            if action == "cancel":
+                self.agent.resume_plan(execute=True)
+                self.events.publish("plan_resolved", {"id": plan.id, "action": action})
+                return
+            if action == "revise":
+                revision = (feedback or "").strip()
+                if not revision:
+                    self._pending_plan = plan
+                    raise ValueError("feedback is required when revising a plan")
+                self.agent.resume_plan(execute=False, feedback=revision)
+                self.events.publish("plan_resolved", {"id": plan.id, "action": action})
+                self._start_prompt_locked(revision)
+                return
+            self.agent.resume_plan(execute=True)
+            self.events.publish("plan_resolved", {"id": plan.id, "action": action})
+            self._start_prompt_locked(
+                "Implement the approved plan below. Preserve its constraints and verify the completed changes.\n\n"
+                f"{plan.text}"
+            )
 
     def submit_prompt(self, text: str) -> None:
         prompt = text.strip()
@@ -107,6 +182,19 @@ class WebSession:
                 raise RuntimeError("web session is closed")
             if self._status != "IDLE":
                 raise SessionBusyError("an Agent prompt is already running")
+            if self._pending_plan is not None:
+                plan = self._pending_plan
+                self._pending_plan = None
+                if prompt.casefold() in {"执行", "执行方案", "开始执行", "execute"}:
+                    self.agent.resume_plan(execute=True)
+                    self.events.publish("plan_resolved", {"id": plan.id, "action": "execute"})
+                    prompt = (
+                        "Implement the approved plan below. Preserve its constraints and verify the completed changes.\n\n"
+                        f"{plan.text}"
+                    )
+                else:
+                    self.agent.resume_plan(execute=False, feedback=prompt)
+                    self.events.publish("plan_resolved", {"id": plan.id, "action": "revise"})
             self._start_prompt_locked(prompt)
 
     def _start_prompt_locked(self, prompt: str) -> None:
@@ -118,6 +206,8 @@ class WebSession:
     def _run_prompt(self, prompt: str) -> None:
         try:
             self.agent.run_turn(prompt)
+            if self.agent.plan_state is PlanState.WAITING_APPROVAL and self._pending_plan is None:
+                self.mark_plan_ready(self.agent.pending_plan_text or "")
         except Exception as exc:
             self.events.publish("error", {"code": type(exc).__name__, "message": str(exc)})
         finally:
