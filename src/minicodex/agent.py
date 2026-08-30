@@ -1,34 +1,24 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Protocol
 
-from .context import compact_messages, serialize_tool_result
+from .context import ContextManager, serialize_tool_result
 from .models import ModelReply, ToolCall, ToolResult
 from .permissions import AgentMode, PlanState
+from .prompting import (
+    SessionEnvironment,
+    build_runtime_prompt,
+    build_session_prompt,
+    build_static_prompt,
+    build_user_context,
+)
+from .references import ExternalReferenceError, ExternalReferenceRegistry
 from .session import SessionTrace
 from .tools import TOOL_SCHEMAS, ToolRuntime
-
-
-SYSTEM_PROMPT = """You are MiniCodex, a coding agent working only inside the provided workspace.
-Inspect before changing existing files. Use edit_file only with an exact unique old_text.
-Use run_command.commands for sequential command batches; every command must use a structured argv array.
-Set stop_on_failure=true when later commands depend on earlier success.
-Tool errors are recoverable: read the error and adjust.
-After changing code, run a relevant test, build, or lint command when possible.
-Be honest in the final answer about what was verified and what was not.
-Follow the user's language for progress, plans, and final answers. For Chinese requests, use Chinese except for code, paths, commands, API names, errors, and stable status labels.
-For an answer, explanation, review, diagnosis, design, or explicit plan-only request, call enter_plan_mode before exploring. For a clear fix, build, change, or implementation request, execute directly unless the user asks to plan first.
-Before tool calls, expose at most one short progress sentence. Do not expose a full chain of thought."""
-
-PLAN_MODE_PROMPT = """
-
-# PLAN MODE · READ ONLY
-Explore the workspace and return a concrete Markdown plan. This mode is read-only: do not edit files or run commands.
-Include the goal, relevant files, implementation steps, risks, and verification commands. The user must approve the plan before implementation."""
-
 
 ENTER_PLAN_SCHEMA: dict[str, Any] = {
     "type": "function",
@@ -59,6 +49,7 @@ class Model(Protocol):
 
 class StopReason(str, Enum):
     COMPLETED = "COMPLETED"
+    CONTEXT_ERROR = "CONTEXT_ERROR"
     MAX_TURNS = "MAX_TURNS"
     REPEATED_CALL = "REPEATED_CALL"
     INTERRUPTED = "INTERRUPTED"
@@ -80,7 +71,7 @@ class AgentSession:
         model: Model,
         tools: ToolRuntime,
         *,
-        max_turns_per_prompt: int = 20,
+        max_turns_per_prompt: int = 50,
         trace: SessionTrace | None = None,
         on_tool_result: Callable[[ToolResult], None] | None = None,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
@@ -91,11 +82,22 @@ class AgentSession:
         self.trace = trace
         self.on_tool_result = on_tool_result
         self.on_event = on_event
-        self.messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         initial_mode = self.tools.mode
         self.execution_mode = AgentMode.ACT if initial_mode is AgentMode.PLAN else initial_mode
         self.plan_state = PlanState.PLANNING if initial_mode is AgentMode.PLAN else PlanState.INACTIVE
         self.pending_plan_text: str | None = None
+        self.references = ExternalReferenceRegistry(self.tools.guard.root)
+        environment = SessionEnvironment.capture(self.tools.guard.root, max_turns=self.max_turns_per_prompt)
+        self.messages: list[dict[str, Any]] = [
+            {"role": "system", "content": build_static_prompt()},
+            {"role": "system", "content": build_session_prompt(environment)},
+            {"role": "system", "content": ""},
+        ]
+        self._reference_messages: list[dict[str, Any]] = []
+        self.context = ContextManager()
+        self._active_turn = 0
+        self._interrupt_event = threading.Event()
+        self.tools.set_interrupt_checker(self._interrupt_event.is_set)
         self._apply_effective_mode(emit=False)
         self.prompt_count = 0
 
@@ -119,11 +121,111 @@ class AgentSession:
         previous = self.tools.mode
         effective = AgentMode.PLAN if self.plan_state is not PlanState.INACTIVE else self.execution_mode
         self.tools.set_mode(effective)
-        self.messages[0]["content"] = SYSTEM_PROMPT + (PLAN_MODE_PROMPT if effective is AgentMode.PLAN else "")
+        self._refresh_runtime_prompt()
         if emit and previous is not effective:
             payload = {"from": previous.value, "to": effective.value}
             self._trace("mode_changed", payload)
             self._emit("mode_changed", payload)
+
+    def _refresh_runtime_prompt(self) -> None:
+        effective = AgentMode.PLAN if self.plan_state is not PlanState.INACTIVE else self.execution_mode
+        self.messages[2]["content"] = build_runtime_prompt(
+            effective_mode=effective,
+            execution_mode=self.execution_mode,
+            plan_state=self.plan_state,
+            verification_status=self._verification_status(),
+            turn_in_prompt=self._active_turn,
+        )
+
+    def reference_metadata(self) -> list[dict[str, Any]]:
+        return self.references.metadata()
+
+    def _compact_history(self, *, turn: int | None = None) -> None:
+        result = self.context.prepare(
+            self.messages,
+            checkpoint_factory=self.tools.context_checkpoint,
+        )
+        if result.changed:
+            self.messages = result.messages
+            payload = {
+                "before_messages": result.before_messages,
+                "after_messages": result.after_messages,
+                "before_chars": result.before_chars,
+                "after_chars": result.after_chars,
+                "before_tokens": result.before_tokens,
+                "after_tokens": result.after_tokens,
+                "stages": list(result.stages),
+                "reductions": result.reductions,
+                "compaction_count": self.context.compaction_count,
+            }
+            if turn is not None:
+                payload["turn"] = turn
+            self._trace("context_compacted", payload)
+            self._emit("context_compacted", payload)
+        active_message_ids = {id(message) for message in self.messages}
+        self._reference_messages = [
+            entry for entry in self._reference_messages if id(entry["message"]) in active_message_ids
+        ]
+
+    def reset_interrupt(self) -> None:
+        self._interrupt_event.clear()
+
+    def request_interrupt(self) -> None:
+        self._interrupt_event.set()
+        self._trace("interrupt_requested", {"prompt_index": self.prompt_count})
+        self._emit("interrupt_requested", {"prompt_index": self.prompt_count})
+
+    def _interrupted(self, turns: int) -> AgentOutcome:
+        self._cancel_unanswered_tool_calls("Skipped because the prompt was interrupted by the user.")
+        return self._outcome(StopReason.INTERRUPTED, "已停止当前任务。", turns)
+
+    def context_snapshot(self) -> dict[str, Any]:
+        policy = self.context.policy
+        return {
+            "current_chars": sum(len(json.dumps(message, ensure_ascii=False, separators=(",", ":"))) for message in self.messages),
+            "budget_tokens": policy.budget_tokens,
+            "stale_tokens": policy.stale_tokens,
+            "auto_compact_tokens": policy.auto_compact_tokens,
+            "target_tokens": policy.target_tokens,
+            "recent_tool_turns": policy.recent_tool_turns,
+            "recent_tool_chars": policy.recent_tool_chars,
+            "compaction_count": self.context.compaction_count,
+        }
+
+    def _scrub_reference_messages(self, reference_id: str) -> None:
+        active_message_ids = {id(message) for message in self.messages}
+        retained_entries: list[dict[str, Any]] = []
+        for entry in self._reference_messages:
+            message = entry["message"]
+            if id(message) not in active_message_ids:
+                continue
+            entry["references"] = [
+                reference for reference in entry["references"] if reference.id != reference_id
+            ]
+            message["content"] = build_user_context(entry["prompt"], entry["references"])
+            retained_entries.append(entry)
+        self._reference_messages = retained_entries
+
+    def _attach_missing_references(self, entry: dict[str, Any]) -> None:
+        represented = {
+            reference.id
+            for reference_entry in self._reference_messages
+            for reference in reference_entry["references"]
+        }
+        missing = [reference for reference in self.references.active() if reference.id not in represented]
+        if not missing:
+            return
+        entry["references"].extend(missing)
+        entry["message"]["content"] = build_user_context(entry["prompt"], entry["references"])
+
+    def remove_reference(self, reference_id: str) -> bool:
+        metadata = next((item for item in self.references.metadata() if item["id"] == reference_id), None)
+        if metadata is None or not self.references.remove(reference_id):
+            return False
+        self._scrub_reference_messages(reference_id)
+        self._trace("context_removed", metadata)
+        self._emit("context_removed", metadata)
+        return True
 
     def enter_plan_mode(self, call_id: str) -> ToolResult:
         if self.plan_state is PlanState.INACTIVE:
@@ -248,9 +350,29 @@ class AgentSession:
         return outcome
 
     def run_turn(self, prompt: str) -> AgentOutcome:
+        try:
+            loaded_references = self.references.load_from_prompt(prompt)
+        except ExternalReferenceError as exc:
+            self.prompt_count += 1
+            self._emit("user_prompt", {"text": prompt, "prompt_index": self.prompt_count})
+            self._trace("prompt_start", {"prompt": prompt, "prompt_index": self.prompt_count})
+            payload = {"code": exc.code, "message": str(exc), "path": exc.path}
+            self._trace("context_error", payload)
+            self._emit("context_error", payload)
+            return self._outcome(StopReason.CONTEXT_ERROR, f"引用文件失败：{exc}", 0)
+        for reference in loaded_references:
+            self._scrub_reference_messages(reference.id)
+            metadata = reference.metadata()
+            self._trace("context_loaded", metadata)
+            self._emit("context_loaded", metadata)
         self.prompt_count += 1
+        self._active_turn = 0
         self.tools.begin_prompt(self.prompt_count)
-        self.messages.append({"role": "user", "content": prompt})
+        user_message = {"role": "user", "content": prompt}
+        self.messages.append(user_message)
+        reference_entry = {"message": user_message, "prompt": prompt, "references": []}
+        self._reference_messages.append(reference_entry)
+        self._attach_missing_references(reference_entry)
         self._emit("user_prompt", {"text": prompt, "prompt_index": self.prompt_count})
         turns = 0
         previous_fingerprint: str | None = None
@@ -268,8 +390,13 @@ class AgentSession:
         self._trace("prompt_start", {"prompt": prompt, "prompt_index": self.prompt_count})
         try:
             while turns < self.max_turns_per_prompt:
+                if self._interrupt_event.is_set():
+                    return self._interrupted(turns)
                 turns += 1
-                self.messages = compact_messages(self.messages)
+                self._active_turn = turns
+                self._refresh_runtime_prompt()
+                self._compact_history(turn=turns)
+                self._attach_missing_references(reference_entry)
                 reply = self.model.complete(self.messages, self._tool_schemas())
                 self._trace(
                     "model_reply",
@@ -280,6 +407,9 @@ class AgentSession:
                         "tool_calls": [c.__dict__ for c in reply.tool_calls],
                     },
                 )
+                if self._interrupt_event.is_set():
+                    self.messages.append(self._assistant_message(reply))
+                    return self._interrupted(turns)
                 if reply.reasoning_content:
                     self._emit("model_reasoning", {"content": reply.reasoning_content, "turn": turns})
                 if reply.content and reply.tool_calls:
@@ -298,6 +428,8 @@ class AgentSession:
                     return self._outcome(StopReason.COMPLETED, reply.content or "", turns)
 
                 for call in reply.tool_calls:
+                    if self._interrupt_event.is_set():
+                        return self._interrupted(turns)
                     self._emit(
                         "tool_call",
                         {"call_id": call.id, "name": call.name, "arguments": call.arguments, "turn": turns},
@@ -313,18 +445,30 @@ class AgentSession:
                         result = self.tools.execute(call.name, call.id, call.arguments)
                     if self.on_tool_result:
                         self.on_tool_result(result)
-                    self._emit("tool_result", result.to_dict())
-                    if result.ok and isinstance(result.data, dict) and result.data.get("diff"):
-                        self._emit("file_changed", dict(result.data))
+                    self._emit("tool_result", {**result.to_dict(), "turn": turns})
+                    if result.ok and call.name in {"write_file", "edit_file"} and isinstance(result.data, dict):
+                        changed_path = str(result.data.get("path", ""))
+                        change = next(
+                            (
+                                item
+                                for item in self.tools.changes_snapshot(self.prompt_count)
+                                if item.get("path") == changed_path
+                            ),
+                            None,
+                        )
+                    else:
+                        change = None
+                    if change:
+                        self._emit("file_changed", dict(change))
                         self._emit(
                             "diff",
                             {
                                 "call_id": call.id,
-                                "path": str(call.arguments.get("path", "")),
-                                "diff": result.data["diff"],
+                                "path": changed_path,
+                                "diff": change["diff"],
                             },
                         )
-                    if call.name == "run_command" and isinstance(result.data, dict):
+                    if call.name == "run_shell" and isinstance(result.data, dict):
                         for step in result.data.get("commands", []):
                             self._emit(
                                 "command_output",
@@ -332,12 +476,14 @@ class AgentSession:
                                     "call_id": call.id,
                                     "index": step.get("index"),
                                     "status": step.get("status"),
-                                    "argv": step.get("argv", []),
+                                    "command": step.get("command", ""),
                                     "purpose": step.get("purpose"),
                                     "exit_code": step.get("exit_code"),
                                     "stdout": step.get("stdout", ""),
                                     "stderr": step.get("stderr", ""),
                                     "permission": step.get("permission"),
+                                    "review": step.get("review"),
+                                    "turn": turns,
                                 },
                             )
                         self._emit(
@@ -347,9 +493,11 @@ class AgentSession:
                     if result.ok:
                         repeated = 0
                         previous_fingerprint = None
-                    content = serialize_tool_result(result)
+                    content = serialize_tool_result(result, limit=self.context.policy.tool_result_limit)
                     self.messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
                     self._trace("tool_result", result.to_dict())
+                    if self._interrupt_event.is_set():
+                        return self._interrupted(turns)
                     if call.name == "exit_plan_mode" and result.ok:
                         self._cancel_unanswered_tool_calls("Skipped because the completed plan is waiting for user approval.")
                         return self._outcome(StopReason.COMPLETED, self.pending_plan_text or "", turns)
@@ -379,7 +527,7 @@ class Agent(AgentSession):
         model: Model,
         tools: ToolRuntime,
         *,
-        max_turns: int = 20,
+        max_turns: int = 50,
         trace: SessionTrace | None = None,
         on_tool_result: Callable[[ToolResult], None] | None = None,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,

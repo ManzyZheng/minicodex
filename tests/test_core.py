@@ -31,6 +31,23 @@ def test_config_parses_trims_and_deduplicates_allowed_models(monkeypatch: pytest
     assert config.allowed_models == ("qwen3.8-flash", "qwen-plus")
 
 
+def test_config_enables_reviewer_by_default_and_accepts_an_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINICODEX_API_KEY", "test-key")
+    monkeypatch.setenv("MINICODEX_MODEL", "qwen3.8-flash")
+
+    default = Config.from_env()
+
+    assert default.reviewer_enabled is True
+    assert default.reviewer_model == "qwen3.8-flash"
+
+    monkeypatch.setenv("MINICODEX_REVIEWER_ENABLED", "false")
+    monkeypatch.setenv("MINICODEX_REVIEWER_MODEL", "qwen-plus")
+    overridden = Config.from_env()
+
+    assert overridden.reviewer_enabled is False
+    assert overridden.reviewer_model == "qwen-plus"
+
+
 def test_config_requires_api_key_without_environment_or_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("MINICODEX_API_KEY", raising=False)

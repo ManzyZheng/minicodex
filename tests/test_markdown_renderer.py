@@ -14,7 +14,7 @@ RENDERER = ROOT / "src" / "minicodex" / "web" / "static" / "markdown.js"
 
 
 @pytest.mark.skipif(NODE is None, reason="Node.js is optional and unavailable")
-@pytest.mark.parametrize("mode", ["normal", "empty-markers", "invalid-entities"])
+@pytest.mark.parametrize("mode", ["normal", "empty-markers", "invalid-entities", "diff-lines"])
 def test_markdown_renderer_is_safe_and_terminates(mode: str) -> None:
     completed = subprocess.run(
         [NODE, str(SCRIPT), str(RENDERER), mode],

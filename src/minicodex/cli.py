@@ -11,6 +11,7 @@ from .context import truncate_text
 from .models import ToolResult
 from .permissions import AgentMode, ApprovalPrompt
 from .model_adapter import OpenAIChatModel
+from .reviewer import ModelPermissionReviewer
 from .session import SessionTrace
 from .tools import ToolRuntime
 
@@ -20,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("task", nargs="?", help="coding task; if omitted, MiniCodex prompts for it")
     parser.add_argument("--workspace", default=".", help="project directory (default: current directory)")
     parser.add_argument("--model", help="model name; otherwise MINICODEX_MODEL")
-    parser.add_argument("--max-turns", type=int, default=20, help="maximum model turns (default: 20)")
+    parser.add_argument("--max-turns", type=int, default=50, help="maximum model turns (default: 50)")
     parser.add_argument("--mode", choices=[mode.value for mode in AgentMode], default=AgentMode.ACT.value, help="permission mode: plan, act, or auto-act")
     return parser
 
@@ -32,7 +33,9 @@ def confirm_action(prompt: ApprovalPrompt) -> bool:
     if prompt.kind == "command":
         print(f"  purpose: {prompt.details.get('purpose')}")
         print(f"  timeout: {prompt.details.get('timeout_sec')}s")
-        print("  " + repr(prompt.details.get("argv", [])))
+        print("  " + str(prompt.details.get("command", "")))
+        if prompt.details.get("review"):
+            print(f"  reviewer: {prompt.details['review'].get('reason')}")
     else:
         print(f"  path: {prompt.details.get('path')}")
         print(str(prompt.details.get("diff", "")).rstrip())
@@ -50,9 +53,9 @@ def print_tool_result(result: ToolResult) -> None:
         print(f"  {result.error.code}: {result.error.message}")
     if isinstance(result.data, dict):
         detail = result.data.get("diff")
-        if not detail and result.tool == "run_command":
+        if not detail and result.tool == "run_shell":
             detail = "\n".join(
-                f"[{step.get('index')}] {step.get('status')} {step.get('argv')}\n{step.get('stdout', '')}{step.get('stderr', '')}"
+                f"[{step.get('index')}] {step.get('status')} {step.get('command')}\n{step.get('stdout', '')}{step.get('stderr', '')}"
                 for step in result.data.get("commands", [])
             )
         if detail:
@@ -61,6 +64,25 @@ def print_tool_result(result: ToolResult) -> None:
 
 
 def print_agent_event(event_type: str, payload: dict) -> None:
+    if event_type == "context_loaded":
+        size_kib = float(payload.get("size") or 0) / 1024
+        print(
+            f"\n[context:ok] {payload.get('name') or 'file'} · "
+            f"{payload.get('scope') or 'external'} read-only · {size_kib:.1f} KiB"
+        )
+        return
+    if event_type == "context_removed":
+        print(f"\n[context:removed] {payload.get('name') or 'file'}")
+        return
+    if event_type == "context_error":
+        print(f"\n[context:error] {payload.get('code') or 'UNKNOWN'} · {payload.get('message') or 'unable to load reference'}")
+        return
+    if event_type == "context_compacted":
+        print(
+            f"\n[context:compact] {payload.get('before_messages', '?')} → "
+            f"{payload.get('after_messages', '?')} messages"
+        )
+        return
     if event_type != "model_reasoning":
         return
     content = str(payload.get("content") or "").strip()
@@ -98,9 +120,22 @@ def main(argv: list[str] | None = None) -> int:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     trace_path = workspace / ".minicodex" / "sessions" / f"{stamp}.jsonl"
     try:
-        trace = SessionTrace(trace_path, workspace=workspace)
-        runtime = ToolRuntime(workspace, approver=confirm_action, mode=AgentMode(args.mode))
         model = OpenAIChatModel.from_config(config)
+        reviewer = None
+        if config.reviewer_enabled:
+            review_model = OpenAIChatModel.from_config(
+                config,
+                model=config.reviewer_model,
+                enable_thinking=False,
+            )
+            reviewer = ModelPermissionReviewer(review_model).review
+        trace = SessionTrace(trace_path, workspace=workspace)
+        runtime = ToolRuntime(
+            workspace,
+            approver=confirm_action,
+            reviewer=reviewer,
+            mode=AgentMode(args.mode),
+        )
     except KeyboardInterrupt:
         print("\nInterrupted by user.", file=sys.stderr)
         return 130
@@ -123,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"stop_reason: {outcome.stop_reason.value}")
     print(f"verification: {outcome.verification_status}")
     if outcome.verification:
-        print(f"verification command: {outcome.verification.get('argv')}")
+        print(f"verification command: {outcome.verification.get('command')}")
         print(f"verification exit code: {outcome.verification.get('exit_code')}")
     return 0 if outcome.stop_reason is StopReason.COMPLETED else (130 if outcome.stop_reason is StopReason.INTERRUPTED else 1)
 

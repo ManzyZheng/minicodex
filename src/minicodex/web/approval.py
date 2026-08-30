@@ -25,6 +25,7 @@ class ApprovalGate:
         self._pending: ApprovalRequest | None = None
         self._resolved = False
         self._decision = False
+        self._cancelled = False
         self._closed = False
 
     def pending(self) -> ApprovalRequest | None:
@@ -41,6 +42,7 @@ class ApprovalGate:
             self._pending = request
             self._resolved = False
             self._decision = False
+            self._cancelled = False
 
         self.events.publish("approval_required", request.to_payload(wait_timeout=self.wait_timeout))
         self.events.publish("status", {"value": "WAITING_APPROVAL"})
@@ -48,16 +50,19 @@ class ApprovalGate:
         with self._condition:
             resolved = self._condition.wait_for(lambda: self._resolved or self._closed, timeout=self.wait_timeout)
             decision = self._decision if resolved and not self._closed else False
-            reason = "closed" if self._closed else ("allowed" if decision else ("rejected" if resolved else "timeout"))
+            reason = "closed" if self._closed else (
+                "interrupted" if self._cancelled else ("allowed" if decision else ("rejected" if resolved else "timeout"))
+            )
             self._pending = None
             self._resolved = False
             self._decision = False
+            self._cancelled = False
 
         self.events.publish(
             "approval_resolved",
             {"request_id": request.id, "allow": decision, "reason": reason},
         )
-        if reason != "closed":
+        if reason not in {"closed", "interrupted"}:
             self.events.publish("status", {"value": "RUNNING"})
         return decision
 
@@ -66,6 +71,18 @@ class ApprovalGate:
             if self._pending is None or self._pending.id != request_id or self._resolved:
                 return False
             self._decision = bool(allow)
+            self._resolved = True
+            self._condition.notify_all()
+            return True
+
+    def cancel_pending(self, request_id: str | None = None) -> bool:
+        with self._condition:
+            if self._pending is None or self._resolved:
+                return False
+            if request_id is not None and self._pending.id != request_id:
+                return False
+            self._decision = False
+            self._cancelled = True
             self._resolved = True
             self._condition.notify_all()
             return True

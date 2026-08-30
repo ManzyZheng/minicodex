@@ -2,6 +2,9 @@
 
 const $ = (selector) => document.querySelector(selector);
 const conversation = $("#conversation");
+const conversationPane = $("#conversation-scroll");
+const conversationNav = $("#conversation-nav");
+const scrollToBottomButton = $("#scroll-to-bottom");
 const layout = $("#app-layout");
 const promptInput = $("#prompt-input");
 const sendButton = $("#send-button");
@@ -11,8 +14,15 @@ const statusNode = $("#session-status");
 const verificationNode = $("#verification-status");
 const reviewPanel = $("#review-panel");
 const approvalDialog = $("#approval-dialog");
+const sessionReferences = $("#session-references");
+const referenceSummary = $("#reference-summary");
+const referenceList = $("#reference-list");
 const token = new URLSearchParams(window.location.search).get("token") || "";
 const withToken = (path) => `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+const BUSY_STATUSES = new Set(["CONNECTING", "RUNNING", "STOPPING", "WAITING_APPROVAL", "RECONNECTING", "CLOSING"]);
+const INTERRUPTIBLE_STATUSES = new Set(["RUNNING", "WAITING_APPROVAL"]);
+const DEFAULT_VERIFICATION = "NOT_RUN";
+const JSON_HEADERS = {"Content-Type": "application/json"};
 
 const state = {
   turns: new Map(),
@@ -23,6 +33,9 @@ const state = {
   pendingApprovalId: null,
   latestEventId: 0,
   executionMode: "act",
+  references: new Map(),
+  pendingTurnReferences: [],
+  status: "CONNECTING",
 };
 
 function element(tag, className, text) {
@@ -34,18 +47,23 @@ function element(tag, className, text) {
 
 function setStatus(value) {
   const status = value || "IDLE";
+  state.status = status;
   statusNode.textContent = status;
   statusNode.dataset.status = status;
-  const busy = ["CONNECTING", "RUNNING", "WAITING_APPROVAL", "RECONNECTING", "CLOSING"].includes(status);
+  const busy = BUSY_STATUSES.has(status);
   promptInput.disabled = busy;
-  sendButton.disabled = busy;
+  const interruptible = INTERRUPTIBLE_STATUSES.has(status);
+  sendButton.textContent = interruptible || status === "STOPPING" ? "■" : "↑";
+  sendButton.dataset.action = interruptible ? "stop" : (status === "STOPPING" ? "stopping" : "send");
+  sendButton.disabled = status === "STOPPING" || (busy && !interruptible);
   permissionSelect.disabled = busy;
   modelSelect.disabled = busy || modelSelect.children.length < 2;
 }
 
 function setVerification(value) {
-  verificationNode.textContent = value || "NOT_RUN";
-  verificationNode.dataset.status = value || "NOT_RUN";
+  const verification = value || DEFAULT_VERIFICATION;
+  verificationNode.textContent = verification;
+  verificationNode.dataset.status = verification;
 }
 
 function removeEmpty() {
@@ -57,19 +75,80 @@ function renderMarkdown(target, text) {
   window.MiniCodexMarkdown.renderMarkdown(target, text || "");
 }
 
+function isNearBottom() {
+  return conversationPane.scrollHeight - conversationPane.scrollTop - conversationPane.clientHeight <= 80;
+}
+
+function syncScrollButton() {
+  scrollToBottomButton.hidden = isNearBottom();
+}
+
+function scrollToBottom(behavior = "smooth") {
+  conversationPane.scrollTo({top: conversationPane.scrollHeight, behavior});
+  scrollToBottomButton.hidden = true;
+}
+
+function setActiveConversationTurn(promptIndex) {
+  state.turns.forEach((turn) => {
+    if (turn.navMarker) turn.navMarker.classList.toggle("active", turn.promptIndex === promptIndex);
+  });
+}
+
+function syncActiveConversationTurn() {
+  if (!state.turns.size || typeof conversationPane.getBoundingClientRect !== "function") return;
+  const paneRect = conversationPane.getBoundingClientRect();
+  const activationLine = paneRect.top + Math.min(180, paneRect.height * 0.28);
+  let active = [...state.turns.values()][0];
+  state.turns.forEach((turn) => {
+    if (typeof turn.root.getBoundingClientRect === "function" && turn.root.getBoundingClientRect().top <= activationLine) active = turn;
+  });
+  if (active) setActiveConversationTurn(active.promptIndex);
+}
+
+function createConversationMarker(turn, promptText) {
+  if (!conversationNav) return null;
+  const marker = element("button", "conversation-nav-marker");
+  marker.type = "button";
+  marker.ariaLabel = `跳转到对话 ${turn.promptIndex}`;
+  const line = element("span", "conversation-nav-line");
+  const preview = element("span", "conversation-nav-preview");
+  const label = element("span", "conversation-nav-label", `对话 ${turn.promptIndex}`);
+  const normalized = String(promptText || "（空指令）").replace(/\s+/g, " ").trim();
+  const excerpt = normalized.length > 180 ? `${normalized.slice(0, 180)}…` : normalized;
+  preview.append(label, element("span", "conversation-nav-text", excerpt));
+  marker.append(line, preview);
+  marker.addEventListener("click", () => {
+    setActiveConversationTurn(turn.promptIndex);
+    turn.root.scrollIntoView({behavior: "smooth", block: "start"});
+    turn.user.classList.add("conversation-nav-target");
+    setTimeout(() => turn.user.classList.remove("conversation-nav-target"), 900);
+  });
+  conversationNav.append(marker);
+  return marker;
+}
+
 function createTurn(data) {
   removeEmpty();
-  if (state.current) state.current.root.open = false;
-  const root = element("details", "turn");
-  root.open = true;
-  const summary = element("summary", "turn-summary");
-  summary.append(element("span", "turn-index", `对话 ${data.prompt_index || "—"}`), element("strong", "", data.text || ""));
+  const root = element("article", "turn");
   const body = element("div", "turn-body");
   const user = element("div", "user-message", data.text || "");
+  if (state.pendingTurnReferences.length) {
+    const chips = element("div", "reference-chips");
+    state.pendingTurnReferences.forEach((reference) => {
+      const chip = element("span", "reference-chip", `↗ ${reference.name} · ${reference.scope === "external" ? "外部只读" : "工作区"}`);
+      chips.append(chip);
+    });
+    user.append(chips);
+    state.pendingTurnReferences = [];
+  }
   const process = element("details", "process");
   process.open = true;
-  const processSummary = element("summary", "", "执行过程 · 0 项");
+  const processSummary = element("summary", "", "执行过程 · 0 个执行阶段");
   const processItems = element("div", "process-items");
+  const modelTurnsToggle = element("button", "model-turns-toggle", "");
+  modelTurnsToggle.type = "button";
+  modelTurnsToggle.hidden = true;
+  processItems.append(modelTurnsToggle);
   process.append(processSummary, processItems);
   const finalBlock = element("section", "final-block");
   const finalLabel = element("div", "final-label", "MiniCodex");
@@ -78,12 +157,42 @@ function createTurn(data) {
   const plan = element("section", "plan-slot");
   finalBlock.append(finalLabel, finalAnswer, changes, plan);
   body.append(user, process, finalBlock);
-  root.append(summary, body);
+  root.append(body);
   conversation.append(root);
-  const turn = {root, summary, process, processSummary, processItems, finalLabel, finalAnswer, changes, plan, promptIndex: Number(data.prompt_index || state.turns.size + 1), activityCount: 0, completed: false, hasFinal: false};
+  const turn = {
+    root,
+    user,
+    process,
+    processSummary,
+    processItems,
+    finalLabel,
+    finalAnswer,
+    changes,
+    plan,
+    promptIndex: Number(data.prompt_index || state.turns.size + 1),
+    modelSteps: new Map(),
+    modelTurnsToggle,
+    showAllModelSteps: false,
+    changesExpanded: false,
+    startedAt: parseEventTime(data.event_timestamp) || Date.now(),
+    completed: false,
+    timerId: null,
+    hasFinal: false,
+    navMarker: null,
+  };
+  modelTurnsToggle.addEventListener("click", () => {
+    turn.showAllModelSteps = !turn.showAllModelSteps;
+    syncModelStepVisibility(turn);
+  });
   state.turns.set(turn.promptIndex, turn);
   state.current = turn;
-  root.scrollIntoView({behavior: "smooth", block: "nearest"});
+  turn.navMarker = createConversationMarker(turn, data.text);
+  setActiveConversationTurn(turn.promptIndex);
+  updateProcess(turn);
+  turn.timerId = setInterval(() => {
+    if (!turn.completed) updateProcess(turn);
+  }, 1000);
+  if (turn.timerId && typeof turn.timerId.unref === "function") turn.timerId.unref();
   return turn;
 }
 
@@ -92,42 +201,119 @@ function currentTurn() {
 }
 
 function updateProcess(turn) {
-  turn.processSummary.textContent = `执行过程 · ${turn.activityCount} 项`;
+  if (turn.completed) return;
+  const duration = formatDuration(Math.max(0, Date.now() - turn.startedAt));
+  turn.processSummary.textContent = `已用时 ${duration} · ${turn.modelSteps.size} 个执行阶段`;
+}
+
+function syncModelStepVisibility(turn) {
+  const steps = [...turn.modelSteps.values()];
+  const hiddenCount = Math.max(0, steps.length - 2);
+  steps.forEach((step, index) => { step.root.hidden = !turn.showAllModelSteps && index < hiddenCount; });
+  turn.modelTurnsToggle.hidden = hiddenCount === 0;
+  turn.modelTurnsToggle.textContent = turn.showAllModelSteps
+    ? `收起较早 ${hiddenCount} 个执行阶段`
+    : `显示更早 ${hiddenCount} 个执行阶段`;
+}
+
+function ensureModelStep(turn, value) {
+  const parsed = Number(value);
+  const modelTurn = Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : Math.max(1, ...turn.modelSteps.keys(), 0);
+  if (turn.modelSteps.has(modelTurn)) return turn.modelSteps.get(modelTurn);
+  const root = element("section", "model-step");
+  const header = element("div", "model-step-header");
+  const number = element("span", "model-step-number", `Turn ${modelTurn}`);
+  const progress = element("p", "model-step-progress");
+  const tools = element("div", "model-step-tools");
+  header.append(number, progress);
+  root.append(header, tools);
+  turn.processItems.append(root);
+  const step = {root, progress, tools, activityGroups: new Map(), lastProgress: ""};
+  turn.modelSteps.set(modelTurn, step);
+  syncModelStepVisibility(turn);
+  updateProcess(turn);
+  return step;
 }
 
 function addProgress(data) {
-  if (!data.text) return;
+  const text = String(data.text || "").trim();
+  if (!text) return;
   const turn = currentTurn();
-  turn.processItems.append(element("p", "progress-line", data.text));
-  turn.activityCount += 1;
-  updateProcess(turn);
+  const step = ensureModelStep(turn, data.turn);
+  if (text === step.lastProgress) return;
+  step.lastProgress = text;
+  step.progress.textContent = text;
 }
+
+const activityLabels = {
+  read_file: "读取文件",
+  list_files: "浏览文件",
+  search_text: "搜索代码",
+  write_file: "修改文件",
+  edit_file: "修改文件",
+  run_shell: "运行 Shell",
+};
 
 function addActivity(data) {
   const turn = currentTurn();
-  const item = element("details", "activity-item");
-  item.dataset.ok = String(data.ok !== false);
-  item.append(element("summary", "", data.text || "工具已完成"));
-  if (data.detail) item.append(element("pre", "", JSON.stringify(data.detail, null, 2)));
-  turn.processItems.append(item);
-  turn.activityCount += 1;
-  updateProcess(turn);
+  const step = ensureModelStep(turn, data.turn);
+  const rawKey = data.group || data.tool || "tool";
+  const key = data.ok === false ? `error:${rawKey}:${data.text || "unknown"}` : rawKey;
+  let group = step.activityGroups.get(key);
+  if (!group) {
+    const item = element("details", "activity-item");
+    const summary = element("summary");
+    const detail = element("pre");
+    item.dataset.ok = String(data.ok !== false);
+    item.append(summary, detail);
+    step.tools.append(item);
+    group = {item, summary, detail, count: 0, label: data.label || activityLabels[rawKey] || data.text || "工具已完成"};
+    step.activityGroups.set(key, group);
+  }
+  group.count += 1;
+  group.summary.textContent = `${group.label} · ${group.count}`;
+  group.detail.textContent = data.detail ? JSON.stringify(data.detail, null, 2) : "完整事件已保存在 JSONL Session Trace。";
 }
 
 function renderFinal(data) {
   const turn = currentTurn();
-  turn.finalLabel.textContent = `最终结果 · Turn ${data.turns || "—"}`;
+  const verification = data.verification_status || verificationNode.textContent || "NOT_RUN";
+  turn.finalLabel.textContent = `Model Turn ${data.turns || "—"} · ${verification}`;
   renderMarkdown(turn.finalAnswer, data.text || "");
   turn.hasFinal = true;
   setVerification(data.verification_status);
+}
+
+function parseEventTime(value) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatDuration(milliseconds) {
+  const seconds = Math.max(1, Math.round(milliseconds / 1000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return `${minutes}分${remainingSeconds}秒`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours}小时${String(remainingMinutes).padStart(2, "0")}分`;
 }
 
 function completeTurn(data) {
   const turn = currentTurn();
   if (!turn.hasFinal) renderFinal(data);
   turn.completed = true;
+  if (turn.timerId !== null) {
+    clearInterval(turn.timerId);
+    turn.timerId = null;
+  }
+  const completedAt = parseEventTime(data.event_timestamp) || Date.now();
+  const duration = formatDuration(Math.max(0, completedAt - turn.startedAt));
+  turn.processSummary.textContent = `用时 ${duration} · ${turn.modelSteps.size} 个执行阶段`;
   turn.process.open = false;
-  turn.root.open = true;
   turn.root.dataset.status = "completed";
   renderChanges(turn);
 }
@@ -139,7 +325,10 @@ function changesForTurn(promptIndex) {
 function renderChanges(turn) {
   const changes = changesForTurn(turn.promptIndex);
   turn.changes.replaceChildren();
-  if (!changes.length) return;
+  if (!changes.length) {
+    if (turn.completed) turn.changes.append(element("p", "no-changes", "本轮未修改文件"));
+    return;
+  }
   const card = element("section", "changes-card");
   const additions = changes.reduce((sum, item) => sum + Number(item.additions || 0), 0);
   const deletions = changes.reduce((sum, item) => sum + Number(item.deletions || 0), 0);
@@ -149,13 +338,24 @@ function renderChanges(turn) {
   totals.append(element("span", "plus", `+${additions}`), element("span", "", "  "), element("span", "minus", `-${deletions}`));
   head.append(totals);
   card.append(head);
-  changes.forEach((change) => {
+  const visibleChanges = turn.changesExpanded ? changes : changes.slice(0, 3);
+  visibleChanges.forEach((change) => {
     const button = element("button", "change-file");
     button.type = "button";
     button.append(element("code", "", change.path), element("span", "plus", `+${change.additions || 0}`), element("span", "minus", `-${change.deletions || 0}`));
     button.addEventListener("click", () => openReview(change.path));
     card.append(button);
   });
+  if (changes.length > 3) {
+    const hiddenCount = changes.length - 3;
+    const toggle = element("button", "changes-toggle", turn.changesExpanded ? "收起文件" : `再显示 ${hiddenCount} 个文件`);
+    toggle.type = "button";
+    toggle.addEventListener("click", () => {
+      turn.changesExpanded = !turn.changesExpanded;
+      renderChanges(turn);
+    });
+    card.append(toggle);
+  }
   turn.changes.append(card);
 }
 
@@ -191,9 +391,7 @@ function renderReview(path) {
   diff.replaceChildren();
   String(change.diff || "没有可预览的文本 Diff").split("\n").forEach((line) => {
     const row = element("span", "diff-row", line || " ");
-    if (line.startsWith("+") && !line.startsWith("+++")) row.classList.add("add");
-    else if (line.startsWith("-") && !line.startsWith("---")) row.classList.add("remove");
-    else if (line.startsWith("@@") || line.startsWith("---") || line.startsWith("+++")) row.classList.add("header");
+    row.classList.add(window.MiniCodexMarkdown.classifyDiffLine(line));
     diff.append(row);
   });
 }
@@ -238,11 +436,62 @@ function showApproval(data) {
   state.pendingApprovalId = data.request_id;
   const details = data.details || {};
   $("#approval-title").textContent = data.kind === "file_change" ? "允许写入这个 Diff？" : "允许执行这个命令？";
-  $("#approval-purpose").textContent = `${data.summary || "Agent 请求执行操作"} · ${data.reason || "需要用户审批"}`;
-  $("#approval-command").textContent = data.kind === "file_change" ? String(details.diff || "") : JSON.stringify(details.argv || [], null, 2);
+  const reviewReason = details.review && details.review.reason ? ` · Reviewer：${details.review.reason}` : "";
+  $("#approval-purpose").textContent = `${data.summary || "Agent 请求执行操作"} · ${data.reason || "需要用户审批"}${reviewReason}`;
+  $("#approval-command").textContent = data.kind === "file_change" ? String(details.diff || "") : String(details.command || "");
   $("#approval-timeout").textContent = `风险 ${String(data.risk || "medium").toUpperCase()} · 等待 ${data.approval_timeout_sec || 300}s`;
   setStatus("WAITING_APPROVAL");
   if (!approvalDialog.open) approvalDialog.showModal();
+}
+
+function referenceMetadata(data) {
+  return {
+    id: String(data.id || ""),
+    name: String(data.name || "文件"),
+    path: String(data.path || ""),
+    scope: data.scope === "workspace" ? "workspace" : "external",
+    size: Number(data.size || 0),
+    access: "read-only-session-snapshot",
+  };
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KiB`;
+}
+
+function renderReferences() {
+  const references = [...state.references.values()];
+  sessionReferences.hidden = references.length === 0;
+  referenceSummary.textContent = `本会话参考 · ${references.length}`;
+  referenceList.replaceChildren();
+  references.forEach((reference) => {
+    const row = element("div", "reference-row");
+    const info = element("div", "reference-info");
+    info.append(
+      element("strong", "", reference.name),
+      element("span", "", `${reference.scope === "external" ? "外部只读" : "工作区"} · ${formatBytes(reference.size)}`),
+      element("code", "", reference.path),
+    );
+    const remove = element("button", "reference-remove", "移除");
+    remove.type = "button";
+    remove.addEventListener("click", () => removeReference(reference.id).catch(reportError));
+    row.append(info, remove);
+    referenceList.append(row);
+  });
+}
+
+function contextLoaded(data) {
+  const reference = referenceMetadata(data);
+  if (!reference.id) return;
+  state.references.set(reference.id, reference);
+  state.pendingTurnReferences.push(reference);
+  renderReferences();
+}
+
+function contextRemoved(data) {
+  if (data.id) state.references.delete(String(data.id));
+  renderReferences();
 }
 
 const handlers = {
@@ -252,7 +501,7 @@ const handlers = {
   user_prompt(data) { createTurn(data); },
   progress: addProgress,
   tool_summary: addActivity,
-  command_summary: addActivity,
+  command_summary(data) { addActivity({...data, group: "command", label: data.text || "运行命令"}); },
   file_changed: rememberChange,
   final_answer: renderFinal,
   turn_completed: completeTurn,
@@ -260,13 +509,25 @@ const handlers = {
   plan_ready: renderPlan,
   plan_resolved() { state.pendingPlan = null; if (state.current) state.current.plan.replaceChildren(); },
   approval_required: showApproval,
-  approval_resolved() { state.pendingApprovalId = null; if (approvalDialog.open) approvalDialog.close(); setStatus("RUNNING"); },
-  error(data) { addActivity({ok: false, text: `错误 · ${data.code || "UNKNOWN"}`, detail: data}); },
+  approval_resolved(data) {
+    state.pendingApprovalId = null;
+    if (approvalDialog.open) approvalDialog.close();
+    if (data.reason !== "interrupted" && state.status !== "STOPPING") setStatus("RUNNING");
+  },
+  context_loaded: contextLoaded,
+  context_removed: contextRemoved,
+  context_error(data) { addActivity({ok: false, group: "context-error", label: `参考文件失败 · ${data.code || "UNKNOWN"}`, detail: data}); },
+  context_compacted(data) { addActivity({ok: true, group: "context-compact", label: `上下文已压缩 · ${formatCompactChars(data.before_chars)} → ${formatCompactChars(data.after_chars)} 字符`, detail: data}); },
+  interrupt_requested() { setStatus("STOPPING"); },
+  error(data) { addActivity({ok: false, group: "error", label: `错误 · ${data.code || "UNKNOWN"}`, text: `错误 · ${data.code || "UNKNOWN"}`, detail: data}); },
 };
 
 function handleEvent(type, data) {
+  const followOutput = isNearBottom();
   const handler = handlers[type];
   if (handler) handler(data || {});
+  if (followOutput) scrollToBottom("auto");
+  else syncScrollButton();
 }
 
 function setWorkspace(path) {
@@ -301,6 +562,9 @@ async function loadSnapshot() {
   setModels(data.allowed_models, data.model);
   setVerification(data.verification_status);
   (data.file_changes || []).forEach(rememberChange);
+  state.references.clear();
+  (data.references || []).map(referenceMetadata).forEach((reference) => state.references.set(reference.id, reference));
+  renderReferences();
   if (data.pending_plan) {
     state.pendingPlan = data.pending_plan;
     if (state.current) renderPlan(data.pending_plan);
@@ -322,32 +586,91 @@ function connectEvents(after) {
   source.onopen = () => loadSnapshot().catch(reportError);
 }
 
+async function postJson(path, body) {
+  const response = await fetch(withToken(path), {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const error = new Error(await response.text());
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
+
+async function removeReference(referenceId) {
+  const response = await fetch(withToken(`/api/references/${encodeURIComponent(referenceId)}`), {method: "DELETE"});
+  if (!response.ok) throw new Error(await response.text());
+  state.references.delete(referenceId);
+  renderReferences();
+  return response.json();
+}
+
 async function submitPrompt() {
   const text = promptInput.value.trim();
   if (!text) return;
   setStatus("RUNNING");
-  const response = await fetch(withToken("/api/prompts"), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text, permission: permissionSelect.value, model: modelSelect.value})});
-  if (!response.ok) { reportError(new Error(await response.text())); await loadSnapshot(); return; }
+  try {
+    await postJson("/api/prompts", {text, permission: permissionSelect.value, model: modelSelect.value});
+  } catch (error) {
+    reportError(error);
+    await loadSnapshot();
+    return;
+  }
   promptInput.value = "";
 }
 
+function formatCompactChars(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "?";
+  if (amount >= 1_000_000) return `${(amount / 1_000_000).toFixed(1)}M`;
+  if (amount >= 1_000) return `${(amount / 1_000).toFixed(1)}K`;
+  return String(Math.round(amount));
+}
+
+async function interruptPrompt() {
+  if (!INTERRUPTIBLE_STATUSES.has(state.status)) return;
+  setStatus("STOPPING");
+  try {
+    await postJson("/api/interrupt", {});
+  } catch (error) {
+    await loadSnapshot();
+    if (error.status === 409) return;
+    throw error;
+  }
+}
+
+async function primaryAction() {
+  if (INTERRUPTIBLE_STATUSES.has(state.status)) return interruptPrompt();
+  return submitPrompt();
+}
+
 async function changePermission() {
-  const response = await fetch(withToken("/api/mode"), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({mode: permissionSelect.value})});
-  if (!response.ok) { await loadSnapshot(); throw new Error(await response.text()); }
-  setPermission((await response.json()).mode);
+  try {
+    const data = await postJson("/api/mode", {mode: permissionSelect.value});
+    setPermission(data.mode);
+  } catch (error) {
+    await loadSnapshot();
+    throw error;
+  }
 }
 
 async function resolvePlan(action) {
   if (!state.pendingPlan) return;
   setStatus("RUNNING");
-  const response = await fetch(withToken(`/api/plans/${encodeURIComponent(state.pendingPlan.id)}/resolve`), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action})});
-  if (!response.ok) { await loadSnapshot(); throw new Error(await response.text()); }
+  try {
+    await postJson(`/api/plans/${encodeURIComponent(state.pendingPlan.id)}/resolve`, {action});
+  } catch (error) {
+    await loadSnapshot();
+    throw error;
+  }
 }
 
 async function decideApproval(allow) {
   if (!state.pendingApprovalId) return;
-  const response = await fetch(withToken(`/api/approvals/${encodeURIComponent(state.pendingApprovalId)}`), {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({allow})});
-  if (!response.ok) throw new Error(await response.text());
+  await postJson(`/api/approvals/${encodeURIComponent(state.pendingApprovalId)}`, {allow});
 }
 
 function reportError(error) {
@@ -356,12 +679,18 @@ function reportError(error) {
 }
 
 $("#prompt-form").addEventListener("submit", (event) => { event.preventDefault(); submitPrompt().catch(reportError); });
+sendButton.addEventListener("click", () => primaryAction().catch(reportError));
 promptInput.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submitPrompt().catch(reportError); } });
 permissionSelect.addEventListener("change", () => changePermission().catch(reportError));
 $("#close-review").addEventListener("click", closeReview);
 $("#allow-command").addEventListener("click", () => decideApproval(true).catch(reportError));
 $("#reject-command").addEventListener("click", () => decideApproval(false).catch(reportError));
 approvalDialog.addEventListener("cancel", (event) => { event.preventDefault(); decideApproval(false).catch(reportError); });
+conversationPane.addEventListener("scroll", () => {
+  syncScrollButton();
+  syncActiveConversationTurn();
+});
+scrollToBottomButton.addEventListener("click", () => scrollToBottom());
 
-window.MiniCodexApp = {handleEvent, setStatus, openReview, closeReview};
+window.MiniCodexApp = {handleEvent, setStatus, openReview, closeReview, isNearBottom, syncScrollButton};
 loadSnapshot().then(() => connectEvents(0)).catch(reportError);

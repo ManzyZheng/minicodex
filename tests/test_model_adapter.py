@@ -36,6 +36,7 @@ def test_openai_adapter_parses_tool_calls_and_sends_tools() -> None:
     assert reply.tool_calls[0].arguments == {"path": "a.py"}
     assert completions.calls[0]["model"] == "demo"
     assert completions.calls[0]["tools"] == [{"type": "function"}]
+    assert completions.calls[0]["parallel_tool_calls"] is True
 
 
 def test_openai_adapter_retries_transient_status_three_attempts() -> None:
@@ -73,3 +74,16 @@ def test_openai_adapter_model_can_change_between_prompts() -> None:
     model.complete([], [])
 
     assert [call["model"] for call in completions.calls] == ["first", "second"]
+
+
+def test_openai_adapter_can_create_non_thinking_reviewer_from_same_config(monkeypatch) -> None:
+    from minicodex.config import Config
+
+    client = client_with(FakeCompletions([]))
+    monkeypatch.setattr("openai.OpenAI", lambda **_kwargs: client)
+    config = Config(api_key="secret", model="main", reviewer_model="reviewer", enable_thinking=True)
+
+    reviewer = OpenAIChatModel.from_config(config, model=config.reviewer_model, enable_thinking=False)
+
+    assert reviewer.model == "reviewer"
+    assert reviewer.enable_thinking is False

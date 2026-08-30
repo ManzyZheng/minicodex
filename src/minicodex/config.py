@@ -18,10 +18,12 @@ class Config:
     allowed_models: tuple[str, ...] = ()
     base_url: str | None = None
     enable_thinking: bool = False
-    max_turns: int = 20
+    reviewer_enabled: bool = True
+    reviewer_model: str | None = None
+    max_turns: int = 50
 
     @classmethod
-    def from_env(cls, *, model: str | None = None, max_turns: int = 20) -> "Config":
+    def from_env(cls, *, model: str | None = None, max_turns: int = 50) -> "Config":
         dotenv = dotenv_values(Path.cwd() / ".env")
         api_key = (
             os.getenv("MINICODEX_API_KEY")
@@ -41,6 +43,16 @@ class Config:
                 + [item.strip() for item in configured_models.split(",") if item.strip() and item.strip() != selected_model]
             )
         )
+        reviewer_enabled = (
+            os.getenv("MINICODEX_REVIEWER_ENABLED")
+            or dotenv.get("MINICODEX_REVIEWER_ENABLED")
+            or "true"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        reviewer_model = (
+            os.getenv("MINICODEX_REVIEWER_MODEL")
+            or dotenv.get("MINICODEX_REVIEWER_MODEL")
+            or selected_model
+        )
         return cls(
             api_key=api_key,
             model=selected_model,
@@ -48,5 +60,7 @@ class Config:
             base_url=os.getenv("MINICODEX_BASE_URL") or dotenv.get("MINICODEX_BASE_URL") or None,
             enable_thinking=(os.getenv("MINICODEX_ENABLE_THINKING") or dotenv.get("MINICODEX_ENABLE_THINKING") or "false").strip().lower()
             in {"1", "true", "yes", "on"},
+            reviewer_enabled=reviewer_enabled,
+            reviewer_model=str(reviewer_model),
             max_turns=max_turns,
         )

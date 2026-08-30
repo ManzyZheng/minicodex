@@ -44,6 +44,26 @@
       (line.includes("|") && isTableDivider(lines[index + 1] || ""));
   }
 
+  function classifyDiffLine(line) {
+    if (/^(?:diff --git |index |@@|--- |\+\+\+ )/.test(line)) return "header";
+    if (line.startsWith("+")) return "add";
+    if (line.startsWith("-")) return "remove";
+    return "context";
+  }
+
+  function appendCodeLines(code, language, codeLines) {
+    if (language.toLowerCase() !== "diff") {
+      code.textContent = decodeEntities(codeLines.join("\n"));
+      return;
+    }
+    for (const line of codeLines) {
+      const row = document.createElement("span");
+      row.className = `md-diff-line ${classifyDiffLine(line)}`;
+      row.textContent = decodeEntities(line);
+      code.append(row);
+    }
+  }
+
   function renderMarkdown(container, source) {
     container.replaceChildren();
     const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
@@ -59,7 +79,7 @@
         const pre = document.createElement("pre");
         const code = document.createElement("code");
         if (language) code.dataset.language = language;
-        code.textContent = decodeEntities(codeLines.join("\n"));
+        appendCodeLines(code, language, codeLines);
         pre.append(code);
         container.append(pre);
         continue;
@@ -115,5 +135,5 @@
     }
   }
 
-  root.MiniCodexMarkdown = {decodeEntities, renderMarkdown};
+  root.MiniCodexMarkdown = {classifyDiffLine, decodeEntities, renderMarkdown};
 })(window);

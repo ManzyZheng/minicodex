@@ -9,6 +9,7 @@ def test_web_cli_exposes_only_local_port_configuration() -> None:
     assert args.port == 8123
     assert not hasattr(args, "host")
     assert args.mode == "act"
+    assert args.max_turns == 50
 
 
 def test_serve_always_binds_to_loopback(monkeypatch) -> None:
@@ -40,6 +41,7 @@ def test_web_cli_projects_short_progress_and_deterministic_tool_summary() -> Non
 
     web_cli.publish_agent_event(events, "model_message", {"turn": 2, "content": "正在检查失败测试。"})
     web_cli.publish_agent_event(events, "tool_result", {
+        "turn": 2,
         "ok": True,
         "tool": "read_file",
         "call_id": "read",
@@ -53,6 +55,7 @@ def test_web_cli_projects_short_progress_and_deterministic_tool_summary() -> Non
     assert retained[0] == ("progress", {"text": "正在检查失败测试。", "turn": 2})
     assert retained[1][0] == "tool_summary"
     assert retained[1][1]["text"] == "已读取 app.py"
+    assert retained[1][1]["turn"] == 2
     assert retained[1][1]["detail"]["call_id"] == "read"
 
 

@@ -7,6 +7,7 @@ class FakeNode {
     this.tagName = tagName ? tagName.toUpperCase() : null;
     this.children = [];
     this.dataset = {};
+    this.className = "";
     this._text = String(text);
   }
 
@@ -44,6 +45,17 @@ if (mode === "normal") {
   assert.equal(markdown.decodeEntities("x&#x110000;y"), "x&#x110000;y");
   assert.equal(markdown.decodeEntities("x&#999999999999999999999;y"), "x&#999999999999999999999;y");
   assert.equal(markdown.decodeEntities("A&#x20;B"), "A B");
+} else if (mode === "diff-lines") {
+  const box = new FakeNode("div");
+  markdown.renderMarkdown(box, "```diff\ndiff --git a/app.py b/app.py\n@@ -1 +1 @@\n-old <script>\n+new <script>\n context\n```");
+  const code = box.children[0].children[0];
+  assert.equal(code.dataset.language, "diff");
+  assert.deepEqual(
+    code.children.map((line) => line.className),
+    ["md-diff-line header", "md-diff-line header", "md-diff-line remove", "md-diff-line add", "md-diff-line context"],
+  );
+  assert.equal(code.children[2].textContent, "-old <script>");
+  assert(!tags(code).includes("SCRIPT"));
 } else {
   throw new Error(`unknown mode: ${mode}`);
 }

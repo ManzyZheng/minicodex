@@ -55,6 +55,39 @@ def test_session_and_prompt_endpoints_report_state_and_busy(tmp_path) -> None:
     assert session.wait_until_idle(1.0)
 
 
+def test_interrupt_endpoint_stops_the_current_prompt(tmp_path) -> None:
+    client, session, model = make_client(tmp_path)
+    assert client.post(api(client, "/api/prompts"), json={"text": "long task"}).status_code == 202
+    assert model.started.wait(0.5)
+
+    interrupted = client.post(api(client, "/api/interrupt"))
+
+    assert interrupted.status_code == 202
+    assert interrupted.json() == {"status": "stopping"}
+    assert session.snapshot()["status"] == "STOPPING"
+    model.release.set()
+    assert session.wait_until_idle(1.0)
+    assert client.post(api(client, "/api/interrupt")).status_code == 409
+
+
+def test_reference_delete_endpoint_returns_metadata_only_snapshot(tmp_path) -> None:
+    client, session, _model = make_client(tmp_path)
+    external = tmp_path.parent / "api.md"
+    external.write_text("SECRET_REFERENCE_CONTENT", encoding="utf-8")
+    reference = session.agent.references.load_from_prompt(f"@{{{external}}}")[0]
+
+    snapshot = client.get(api(client, "/api/session")).json()
+    assert snapshot["references"][0]["id"] == reference.id
+    assert "content" not in snapshot["references"][0]
+
+    removed = client.delete(api(client, f"/api/references/{reference.id}"))
+    stale = client.delete(api(client, f"/api/references/{reference.id}"))
+
+    assert removed.status_code == 200
+    assert removed.json() == {"status": "removed"}
+    assert stale.status_code == 404
+
+
 def test_prompt_endpoint_rejects_blank_text(tmp_path) -> None:
     client, _session, _model = make_client(tmp_path)
     response = client.post(api(client, "/api/prompts"), json={"text": "   "})
@@ -76,7 +109,10 @@ def test_app_rejects_non_loopback_host(tmp_path) -> None:
 
 def test_sse_formatter_uses_id_event_and_compact_json() -> None:
     event = WebEvent(7, "status", "2026-08-27T00:00:00Z", {"value": "IDLE"})
-    assert format_sse_event(event) == 'id: 7\nevent: status\ndata: {"value":"IDLE"}\n\n'
+    assert format_sse_event(event) == (
+        'id: 7\nevent: status\ndata: {"value":"IDLE",'
+        '"event_timestamp":"2026-08-27T00:00:00Z"}\n\n'
+    )
 
 
 def test_mode_endpoint_updates_session_and_rejects_invalid_mode(tmp_path) -> None:

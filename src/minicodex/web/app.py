@@ -37,7 +37,8 @@ class PlanResolutionRequest(BaseModel):
 
 
 def format_sse_event(event: WebEvent) -> str:
-    data = json.dumps(event.payload, ensure_ascii=False, separators=(",", ":"))
+    payload = {**event.payload, "event_timestamp": event.timestamp}
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"id: {event.id}\nevent: {event.type}\ndata: {data}\n\n"
 
 
@@ -91,6 +92,12 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"status": "accepted"}
 
+    @app.post("/api/interrupt", status_code=status.HTTP_202_ACCEPTED)
+    def interrupt_prompt() -> dict[str, str]:
+        if not web_session.interrupt():
+            raise HTTPException(status_code=409, detail="no Agent prompt is currently running")
+        return {"status": "stopping"}
+
     @app.post("/api/mode")
     def change_mode(body: ModeRequest) -> dict[str, str]:
         try:
@@ -124,6 +131,16 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
         if not web_session.resolve_approval(request_id, body.allow):
             raise HTTPException(status_code=409, detail="approval is missing, stale, or already resolved")
         return {"status": "resolved"}
+
+    @app.delete("/api/references/{reference_id}")
+    def remove_reference(reference_id: str) -> dict[str, str]:
+        try:
+            removed = web_session.remove_reference(reference_id)
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not removed:
+            raise HTTPException(status_code=404, detail="reference is missing or already removed")
+        return {"status": "removed"}
 
     @app.get("/api/events")
     async def event_stream(

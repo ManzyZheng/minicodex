@@ -13,6 +13,7 @@ from .cli import print_agent_event, print_tool_result
 from .config import Config, ConfigError
 from .model_adapter import OpenAIChatModel
 from .permissions import AgentMode
+from .reviewer import ModelPermissionReviewer
 from .session import SessionTrace
 from .tools import ToolRuntime
 from .web.app import create_app
@@ -25,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="minicodex-web", description="Run the local MiniCodex web console.")
     parser.add_argument("--workspace", default=".", help="project directory (default: current directory)")
     parser.add_argument("--model", help="model name; otherwise MINICODEX_MODEL")
-    parser.add_argument("--max-turns", type=int, default=20, help="maximum model turns per prompt (default: 20)")
+    parser.add_argument("--max-turns", type=int, default=50, help="maximum model turns per prompt (default: 50)")
     parser.add_argument("--port", type=int, default=8000, help="loopback port (default: 8000)")
     parser.add_argument("--mode", choices=[mode.value for mode in AgentMode], default=AgentMode.ACT.value, help="initial permission mode")
     return parser
@@ -54,7 +55,7 @@ def summarize_tool_result(payload: dict) -> dict:
         text = f"已搜索文本，找到 {len(data.get('matches', []))} 处"
     elif tool in {"write_file", "edit_file"}:
         text = f"已修改 {data.get('path') or '文件'}"
-    elif tool == "run_command":
+    elif tool == "run_shell":
         text = f"已运行 {len(data.get('commands', []))} 个命令"
     else:
         text = str(payload.get("summary") or tool)
@@ -63,6 +64,7 @@ def summarize_tool_result(payload: dict) -> dict:
         "tool": tool,
         "ok": bool(payload.get("ok")),
         "detail": payload,
+        "turn": payload.get("turn"),
     }
 
 
@@ -77,7 +79,7 @@ def summarize_command(payload: dict) -> dict:
         text = f"命令{payload.get('status') or '未执行'}"
     else:
         text = f"命令失败 · exit code {exit_code}"
-    return {"text": text, "detail": payload}
+    return {"text": text, "detail": payload, "turn": payload.get("turn")}
 
 
 def publish_agent_event(events: EventBus, event_type: str, payload: dict) -> None:
@@ -122,8 +124,21 @@ def main(argv: list[str] | None = None) -> int:
         trace = SessionTrace(trace_path, workspace=workspace)
         events = EventBus()
         approvals = ApprovalGate(events)
-        runtime = ToolRuntime(workspace, approver=approvals.request, mode=AgentMode(args.mode))
         model = OpenAIChatModel.from_config(config)
+        reviewer = None
+        if config.reviewer_enabled:
+            review_model = OpenAIChatModel.from_config(
+                config,
+                model=config.reviewer_model,
+                enable_thinking=False,
+            )
+            reviewer = ModelPermissionReviewer(review_model).review
+        runtime = ToolRuntime(
+            workspace,
+            approver=approvals.request,
+            reviewer=reviewer,
+            mode=AgentMode(args.mode),
+        )
         agent = AgentSession(
             model,
             runtime,

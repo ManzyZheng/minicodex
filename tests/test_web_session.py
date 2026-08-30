@@ -6,7 +6,7 @@ import pytest
 
 from minicodex.agent import AgentSession
 from minicodex.models import ModelReply
-from minicodex.permissions import AgentMode, PlanState
+from minicodex.permissions import AgentMode, ApprovalPrompt, PlanState
 from minicodex.tools import ToolRuntime
 from minicodex.web.approval import ApprovalGate
 from minicodex.web.events import EventBus
@@ -67,6 +67,47 @@ def test_web_session_rejects_second_prompt_while_running(tmp_path) -> None:
 
     model.release.set()
     assert web.wait_until_idle(timeout=1.0)
+
+
+def test_web_session_interrupts_after_the_blocking_model_returns(tmp_path) -> None:
+    model = BlockingModel()
+    web = make_web_session(tmp_path, model)
+    web.submit_prompt("long reasoning")
+    assert model.started.wait(0.5)
+
+    assert web.interrupt() is True
+    assert web.snapshot()["status"] == "STOPPING"
+    model.release.set()
+
+    assert web.wait_until_idle(timeout=1.0)
+    completed = [event for event in web.events.after(0) if event.type == "turn_completed"][-1]
+    assert completed.payload["stop_reason"] == "INTERRUPTED"
+    assert web.interrupt() is False
+
+
+def test_snapshot_keeps_stopping_status_while_approval_is_pending(tmp_path) -> None:
+    web = make_web_session(tmp_path, ReplyModel([]))
+    request_thread = threading.Thread(
+        target=lambda: web.approvals.request(
+            ApprovalPrompt(
+                kind="command",
+                tool="run_shell",
+                summary="run command",
+                reason="review",
+                risk="medium",
+                rule_id="test",
+                details={},
+            )
+        )
+    )
+    with web._condition:
+        web._status = "RUNNING"
+    request_thread.start()
+    assert web.events.wait_after(0, timeout=0.2)
+
+    assert web.interrupt()
+    assert web.snapshot()["status"] == "STOPPING"
+    request_thread.join(0.5)
 
 
 def test_close_reports_closing_until_worker_finishes(tmp_path) -> None:
@@ -175,6 +216,37 @@ def test_session_snapshot_restores_cumulative_file_changes(tmp_path) -> None:
     assert snapshot["file_changes"][0]["path"] == "app.py"
     assert snapshot["file_changes"][0]["prompt_index"] == 1
     assert "+value = 2" in snapshot["file_changes"][0]["diff"]
+
+
+def test_session_snapshot_exposes_reference_metadata_and_removes_it_only_while_idle(tmp_path) -> None:
+    external = tmp_path.parent / "api.md"
+    external.write_text("REFERENCE_CONTENT", encoding="utf-8")
+    web = make_web_session(tmp_path, ReplyModel([]), mode=AgentMode.AUTO_ACT)
+    reference = web.agent.references.load_from_prompt(f"@{{{external}}}")[0]
+
+    snapshot = web.snapshot()
+
+    assert snapshot["references"][0]["id"] == reference.id
+    assert "content" not in snapshot["references"][0]
+    assert web.remove_reference(reference.id) is True
+    assert web.snapshot()["references"] == []
+    assert web.remove_reference(reference.id) is False
+
+
+def test_session_rejects_reference_removal_while_agent_is_running(tmp_path) -> None:
+    external = tmp_path.parent / "api.md"
+    external.write_text("content", encoding="utf-8")
+    model = BlockingModel()
+    web = make_web_session(tmp_path, model)
+    reference = web.agent.references.load_from_prompt(f"@{{{external}}}")[0]
+    web.submit_prompt("work")
+    assert model.started.wait(0.5)
+
+    with pytest.raises(SessionBusyError):
+        web.remove_reference(reference.id)
+
+    model.release.set()
+    assert web.wait_until_idle(1.0)
 
 
 def test_changing_execution_permission_while_plan_waits_does_not_exit_plan(tmp_path) -> None:

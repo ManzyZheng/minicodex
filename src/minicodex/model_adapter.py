@@ -25,7 +25,13 @@ class OpenAIChatModel:
         self.sleep = sleep
 
     @classmethod
-    def from_config(cls, config: Config) -> "OpenAIChatModel":
+    def from_config(
+        cls,
+        config: Config,
+        *,
+        model: str | None = None,
+        enable_thinking: bool | None = None,
+    ) -> "OpenAIChatModel":
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -33,7 +39,11 @@ class OpenAIChatModel:
         kwargs: dict[str, Any] = {"api_key": config.api_key}
         if config.base_url:
             kwargs["base_url"] = config.base_url
-        return cls(OpenAI(**kwargs), model=config.model, enable_thinking=config.enable_thinking)
+        return cls(
+            OpenAI(**kwargs),
+            model=model or config.model,
+            enable_thinking=config.enable_thinking if enable_thinking is None else enable_thinking,
+        )
 
     @staticmethod
     def _is_transient(exc: Exception) -> bool:
@@ -55,6 +65,7 @@ class OpenAIChatModel:
                     "messages": messages,
                     "tools": tools,
                     "tool_choice": "auto",
+                    "parallel_tool_calls": True,
                 }
                 if self.enable_thinking:
                     request["extra_body"] = {"enable_thinking": True, "preserve_thinking": False}

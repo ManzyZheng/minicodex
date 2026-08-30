@@ -81,7 +81,9 @@ class WebSession:
             event_id = self.events.latest_id()
             if before == event_id:
                 break
-        if pending is not None:
+        if status == "STOPPING":
+            pass
+        elif pending is not None:
             status = "WAITING_APPROVAL"
         elif self._pending_plan is not None:
             status = "WAITING_PLAN_APPROVAL"
@@ -100,7 +102,27 @@ class WebSession:
             "prompt_count": self.agent.prompt_count,
             "event_id": event_id,
             "pending_approval": pending.to_payload(wait_timeout=self.approvals.wait_timeout) if pending else None,
+            "references": self.agent.reference_metadata(),
+            "context": self.agent.context_snapshot(),
         }
+
+    def interrupt(self) -> bool:
+        with self._condition:
+            if self._status not in {"RUNNING", "WAITING_APPROVAL"}:
+                return False
+            self._status = "STOPPING"
+            pending = self.approvals.pending()
+            self.agent.request_interrupt()
+            self.events.publish("status", {"value": "STOPPING"})
+        if pending is not None:
+            self.approvals.cancel_pending(pending.id)
+        return True
+
+    def remove_reference(self, reference_id: str) -> bool:
+        with self._condition:
+            if self._status != "IDLE":
+                raise SessionBusyError("references can only be removed while the Agent is idle")
+            return self.agent.remove_reference(reference_id)
 
     def set_mode(self, mode: AgentMode) -> AgentMode:
         with self._condition:
@@ -227,6 +249,7 @@ class WebSession:
             self._start_prompt_locked(prompt)
 
     def _start_prompt_locked(self, prompt: str) -> None:
+        self.agent.reset_interrupt()
         self._status = "RUNNING"
         self.events.publish("status", {"value": "RUNNING"})
         self._worker = threading.Thread(target=self._run_prompt, args=(prompt,), daemon=True)
@@ -257,6 +280,8 @@ class WebSession:
         with self._condition:
             self._closed = True
             worker = self._worker
+        if worker is not None:
+            self.agent.request_interrupt()
         self.approvals.close()
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=max(0.0, wait_timeout))
