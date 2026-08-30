@@ -17,6 +17,10 @@ const approvalDialog = $("#approval-dialog");
 const sessionReferences = $("#session-references");
 const referenceSummary = $("#reference-summary");
 const referenceList = $("#reference-list");
+const projectList = $("#project-list");
+const memoryView = $("#memory-view");
+const memoryList = $("#memory-list");
+const memoryToast = $("#memory-toast");
 const token = new URLSearchParams(window.location.search).get("token") || "";
 const withToken = (path) => `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
 const BUSY_STATUSES = new Set(["CONNECTING", "RUNNING", "STOPPING", "WAITING_APPROVAL", "RECONNECTING", "CLOSING"]);
@@ -36,6 +40,10 @@ const state = {
   references: new Map(),
   pendingTurnReferences: [],
   status: "CONNECTING",
+  projects: [],
+  activeProjectId: null,
+  activeSessionId: null,
+  memoryScope: null,
 };
 
 function element(tag, className, text) {
@@ -69,6 +77,36 @@ function setVerification(value) {
 function removeEmpty() {
   const empty = $("#empty-state");
   if (empty) empty.remove();
+}
+
+function resetConversation() {
+  state.turns.forEach((turn) => { if (turn.timerId !== null) clearInterval(turn.timerId); });
+  state.turns.clear();
+  state.current = null;
+  state.changes.clear();
+  state.selectedPath = null;
+  state.pendingPlan = null;
+  conversation.replaceChildren();
+  conversationNav.replaceChildren();
+  const empty = element("article", "empty-state");
+  empty.id = "empty-state";
+  empty.append(element("div", "empty-mark", "M"), element("h1", "", "开始一个代码任务"), element("p", "", "让 MiniCodex 检查代码、修改文件并运行验证。"));
+  conversation.append(empty);
+  closeReview();
+}
+
+function hydrateHistory(history, verification) {
+  if (state.turns.size || !Array.isArray(history)) return;
+  let turn = null;
+  history.forEach((message) => {
+    if (message.role === "user") turn = createTurn({text: message.content, prompt_index: state.turns.size + 1});
+    if (message.role === "assistant" && turn) {
+      state.current = turn;
+      renderFinal({text: message.content, turns: "—", verification_status: verification || "NOT_RUN"});
+      completeTurn({text: message.content, turns: "—", verification_status: verification || "NOT_RUN"});
+      turn = null;
+    }
+  });
 }
 
 function renderMarkdown(target, text) {
@@ -494,6 +532,14 @@ function contextRemoved(data) {
   renderReferences();
 }
 
+function showMemoryToast(data) {
+  if (!memoryToast) return;
+  const scope = data.scope === "global" ? "全局" : "项目";
+  memoryToast.textContent = `已自动记住 · ${scope}：${data.title || data.content || "新记忆"}`;
+  memoryToast.hidden = false;
+  setTimeout(() => { memoryToast.hidden = true; }, 5000);
+}
+
 const handlers = {
   session_started(data) { if (data.workspace) setWorkspace(data.workspace); if (data.execution_mode) setPermission(data.execution_mode); },
   status(data) { setStatus(data.value); },
@@ -516,6 +562,9 @@ const handlers = {
   },
   context_loaded: contextLoaded,
   context_removed: contextRemoved,
+  session_reset() { resetConversation(); },
+  memory_created(data) { showMemoryToast(data); if (state.memoryScope === data.scope) loadMemories().catch(reportError); },
+  memory_forgotten() { if (state.memoryScope) loadMemories().catch(reportError); },
   context_error(data) { addActivity({ok: false, group: "context-error", label: `参考文件失败 · ${data.code || "UNKNOWN"}`, detail: data}); },
   context_compacted(data) { addActivity({ok: true, group: "context-compact", label: `上下文已压缩 · ${formatCompactChars(data.before_chars)} → ${formatCompactChars(data.after_chars)} 字符`, detail: data}); },
   interrupt_requested() { setStatus("STOPPING"); },
@@ -552,6 +601,125 @@ function setModels(models, selected) {
   modelSelect.value = selected || "";
 }
 
+function renderProjects(data) {
+  state.projects = Array.isArray(data.projects) ? data.projects : [];
+  state.activeProjectId = data.active_project_id || state.activeProjectId;
+  state.activeSessionId = data.active_session_id || state.activeSessionId;
+  if (!projectList) return;
+  projectList.replaceChildren();
+  state.projects.forEach((project) => {
+    const group = element("section", "project-group");
+    const title = element("div", "project-title");
+    title.append(element("span", "", `▾ ${project.name}`));
+    const memory = element("button", "project-memory", "记忆");
+    memory.type = "button";
+    memory.addEventListener("click", (event) => { event.stopPropagation(); openMemory("project", project.id).catch(reportError); });
+    title.append(memory);
+    const sessions = element("div", "session-list");
+    (project.sessions || []).forEach((session) => {
+      const button = element("button", `session-link${session.id === state.activeSessionId ? " active" : ""}`, session.title || "新会话");
+      button.type = "button";
+      button.title = session.title || "新会话";
+      button.append(element("small", "", `${String(session.status || "idle").toUpperCase()} · ${session.verification || "NOT_RUN"}`));
+      button.addEventListener("click", () => activateSession(project.id, session.id).catch(reportError));
+      sessions.append(button);
+    });
+    const add = element("button", "new-session", "＋ 新建会话");
+    add.type = "button";
+    add.disabled = BUSY_STATUSES.has(state.status);
+    add.addEventListener("click", () => createSession(project.id).catch(reportError));
+    sessions.append(add);
+    group.append(title, sessions);
+    projectList.append(group);
+  });
+}
+
+async function createSession(projectId) {
+  const data = await postJson(`/api/projects/${encodeURIComponent(projectId)}/sessions`, {title: "新会话"});
+  resetConversation();
+  state.activeProjectId = projectId;
+  state.activeSessionId = data.id;
+  await loadSnapshot();
+}
+
+async function activateSession(projectId, sessionId) {
+  if (sessionId === state.activeSessionId) return;
+  await postJson(`/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/activate`, {});
+  resetConversation();
+  state.activeProjectId = projectId;
+  state.activeSessionId = sessionId;
+  await loadSnapshot();
+}
+
+async function registerProject() {
+  const workspace = window.prompt("输入本地项目绝对路径");
+  if (!workspace || !workspace.trim()) return;
+  await postJson("/api/projects", {workspace: workspace.trim()});
+  resetConversation();
+  await loadSnapshot();
+}
+
+async function openMemory(scope, projectId = null) {
+  state.memoryScope = scope;
+  if (projectId) state.activeProjectId = projectId;
+  $("#memory-scope-label").textContent = scope === "global" ? "GLOBAL" : "PROJECT";
+  $("#memory-title").textContent = scope === "global" ? "全局记忆" : "项目记忆";
+  memoryView.hidden = false;
+  await loadMemories();
+}
+
+function closeMemory() {
+  memoryView.hidden = true;
+  state.memoryScope = null;
+}
+
+async function loadMemories() {
+  if (!state.memoryScope) return;
+  const suffix = state.memoryScope === "project" ? `&project_id=${encodeURIComponent(state.activeProjectId || "")}` : "";
+  const response = await fetch(withToken(`/api/memories?scope=${state.memoryScope}${suffix}`));
+  if (!response.ok) throw new Error(await response.text());
+  const items = await response.json();
+  memoryList.replaceChildren();
+  if (!items.length) {
+    memoryList.append(element("p", "memory-empty", "还没有长期记忆。"));
+    return;
+  }
+  items.forEach((item) => {
+    const card = element("article", "memory-card");
+    const header = element("header");
+    header.append(element("strong", "", item.title), element("span", "memory-badge", item.kind));
+    const remove = element("button", "memory-forget", "忘记");
+    remove.type = "button";
+    remove.addEventListener("click", () => forgetMemory(item.id).catch(reportError));
+    card.append(header, element("p", "", item.content), element("small", "", `${item.source === "auto" ? "自动提取" : "手动记住"} · ${item.updated_at || ""}`), remove);
+    memoryList.append(card);
+  });
+}
+
+async function forgetMemory(memoryId) {
+  const projectQuery = state.memoryScope === "project" ? `project_id=${encodeURIComponent(state.activeProjectId || "")}` : "";
+  const response = await fetch(withToken(`/api/memories/${encodeURIComponent(memoryId)}${projectQuery ? `?${projectQuery}` : ""}`), {method: "DELETE"});
+  if (!response.ok) throw new Error(await response.text());
+  await loadMemories();
+}
+
+async function submitMemory(event) {
+  event.preventDefault();
+  const title = $("#memory-item-title").value.trim();
+  const content = $("#memory-content").value.trim();
+  if (!title || !content || !state.memoryScope) return;
+  await postJson("/api/memories", {
+    scope: state.memoryScope,
+    project_id: state.memoryScope === "project" ? state.activeProjectId : null,
+    kind: $("#memory-kind").value,
+    title,
+    content,
+  });
+  $("#memory-item-title").value = "";
+  $("#memory-content").value = "";
+  await loadMemories();
+}
+
 async function loadSnapshot() {
   const response = await fetch(withToken("/api/session"));
   if (!response.ok) throw new Error(`session snapshot failed: ${response.status}`);
@@ -561,6 +729,8 @@ async function loadSnapshot() {
   setPermission(data.execution_mode || (data.mode === "auto-act" ? "auto-act" : "act"));
   setModels(data.allowed_models, data.model);
   setVerification(data.verification_status);
+  renderProjects(data);
+  hydrateHistory(data.history, data.verification_status);
   (data.file_changes || []).forEach(rememberChange);
   state.references.clear();
   (data.references || []).map(referenceMetadata).forEach((reference) => state.references.set(reference.id, reference));
@@ -691,6 +861,10 @@ conversationPane.addEventListener("scroll", () => {
   syncActiveConversationTurn();
 });
 scrollToBottomButton.addEventListener("click", () => scrollToBottom());
+$("#new-project")?.addEventListener("click", () => registerProject().catch(reportError));
+$("#global-memory")?.addEventListener("click", () => openMemory("global").catch(reportError));
+$("#close-memory")?.addEventListener("click", closeMemory);
+$("#memory-form")?.addEventListener("submit", (event) => submitMemory(event).catch(reportError));
 
 window.MiniCodexApp = {handleEvent, setStatus, openReview, closeReview, isNearBottom, syncScrollButton};
 loadSnapshot().then(() => connectEvents(0)).catch(reportError);

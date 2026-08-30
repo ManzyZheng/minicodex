@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniCodex · 本地代码 Agent</title>
-  <link rel="stylesheet" href="/static/codex-app.css?v=codex-ui-10">
+  <link rel="stylesheet" href="/static/codex-app.css?v=codex-ui-11">
 </head>
 <body>
   <header class="topbar">
@@ -12,6 +12,11 @@
     <div class="top-status"><code id="workspace-path">正在连接…</code><span id="session-status" class="status-pill">CONNECTING</span><span id="verification-status">NOT_RUN</span></div>
   </header>
   <main id="app-layout" class="app-layout">
+    <aside id="project-sidebar" class="project-sidebar" aria-label="项目与会话">
+      <div class="sidebar-head"><strong>项目</strong><button id="new-project" type="button" title="添加本地项目">＋</button></div>
+      <button id="global-memory" class="sidebar-memory" type="button"><span>◈</span>全局记忆</button>
+      <div id="project-list" class="project-list"></div>
+    </aside>
     <section class="conversation-pane" aria-label="Agent 对话">
       <div id="conversation-scroll" class="conversation-scroll">
         <div id="conversation" class="conversation" aria-live="polite">
@@ -36,6 +41,17 @@
           <button id="send-button" type="button" aria-label="发送指令">↑</button>
         </div>
       </form>
+      <section id="memory-view" class="memory-view" aria-label="记忆管理" hidden>
+        <header><div><span id="memory-scope-label">记忆</span><h2 id="memory-title">记忆管理</h2></div><button id="close-memory" class="icon-button" type="button" aria-label="关闭记忆管理">×</button></header>
+        <form id="memory-form" class="memory-form">
+          <select id="memory-kind" aria-label="记忆类型"><option value="preference">偏好</option><option value="decision">决策</option><option value="reference">参考</option></select>
+          <input id="memory-item-title" maxlength="40" placeholder="标题" required>
+          <textarea id="memory-content" maxlength="300" placeholder="需要长期记住的内容" required></textarea>
+          <button type="submit">记住</button>
+        </form>
+        <div id="memory-list" class="memory-list"></div>
+      </section>
+      <div id="memory-toast" class="memory-toast" hidden></div>
     </section>
     <aside id="review-panel" class="review-panel" aria-label="代码变更审查" hidden>
       <header class="review-header"><div><span>代码变更</span><strong id="review-title">选择文件</strong></div><button id="close-review" class="icon-button" type="button" aria-label="关闭代码审查">×</button></header>
@@ -47,6 +63,6 @@
     <form method="dialog"><span class="dialog-kicker">需要确认</span><h2 id="approval-title">允许 Agent 执行此操作？</h2><p id="approval-purpose"></p><pre><code id="approval-command"></code></pre><p id="approval-timeout" class="muted"></p><div class="approval-actions"><button id="reject-command" type="button" class="secondary">拒绝</button><button id="allow-command" type="button">允许一次</button></div></form>
   </dialog>
   <script src="/static/markdown.js?v=markdown-2" defer></script>
-  <script src="/static/codex-app.js?v=codex-ui-10" defer></script>
+  <script src="/static/codex-app.js?v=codex-ui-11" defer></script>
 </body>
 </html>

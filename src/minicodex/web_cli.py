@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import secrets
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import uvicorn
@@ -12,13 +11,18 @@ from .agent import AgentSession
 from .cli import print_agent_event, print_tool_result
 from .config import Config, ConfigError
 from .model_adapter import OpenAIChatModel
+from .memory import MemoryExtractor, MemoryService, MemoryStore
 from .permissions import AgentMode
+from .persistence import ApplicationPaths
+from .project_sessions import SessionRecord, SessionRepository
+from .projects import ProjectRecord, ProjectRegistry
 from .reviewer import ModelPermissionReviewer
 from .session import SessionTrace
 from .tools import ToolRuntime
 from .web.app import create_app
 from .web.approval import ApprovalGate
 from .web.events import EventBus
+from .web.manager import WebWorkspaceManager
 from .web.session import WebSession
 
 
@@ -119,12 +123,13 @@ def main(argv: list[str] | None = None) -> int:
         if not workspace.is_dir():
             raise ValueError("workspace is not a directory")
         config = Config.from_env(model=args.model, max_turns=args.max_turns)
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        trace_path = workspace / ".minicodex" / "sessions" / f"{stamp}.jsonl"
-        trace = SessionTrace(trace_path, workspace=workspace)
+        paths = ApplicationPaths()
+        registry = ProjectRegistry(paths)
+        session_repository = SessionRepository(paths)
+        memories = MemoryStore(paths)
         events = EventBus()
-        approvals = ApprovalGate(events)
         model = OpenAIChatModel.from_config(config)
+        memory_model = OpenAIChatModel.from_config(config, enable_thinking=False)
         reviewer = None
         if config.reviewer_enabled:
             review_model = OpenAIChatModel.from_config(
@@ -133,28 +138,53 @@ def main(argv: list[str] | None = None) -> int:
                 enable_thinking=False,
             )
             reviewer = ModelPermissionReviewer(review_model).review
-        runtime = ToolRuntime(
-            workspace,
-            approver=approvals.request,
-            reviewer=reviewer,
-            mode=AgentMode(args.mode),
-        )
-        agent = AgentSession(
-            model,
-            runtime,
-            max_turns_per_prompt=config.max_turns,
-            trace=trace,
-            on_tool_result=print_tool_result,
-            on_event=lambda event_type, payload: publish_agent_event(events, event_type, payload),
-        )
-        session = WebSession(
-            agent,
-            events,
-            approvals,
-            workspace=workspace,
-            model_name=config.model,
-            max_turns_per_prompt=config.max_turns,
-            allowed_models=config.allowed_models,
+        def session_factory(
+            project: ProjectRecord,
+            record: SessionRecord,
+            state: dict,
+            on_complete,
+        ) -> WebSession:
+            approvals = ApprovalGate(events)
+            selected_model = record.model if record.model in config.allowed_models else config.model
+            model.set_model(selected_model)
+            runtime = ToolRuntime(
+                project.workspace,
+                approver=approvals.request,
+                reviewer=reviewer,
+                mode=AgentMode(record.mode) if record.mode in {"act", "auto-act"} else AgentMode(args.mode),
+            )
+            trace_path = paths.session_root(project.id, record.id) / "trace.jsonl"
+            agent = AgentSession(
+                model,
+                runtime,
+                max_turns_per_prompt=config.max_turns,
+                trace=SessionTrace(trace_path),
+                on_tool_result=print_tool_result,
+                on_event=lambda event_type, payload: publish_agent_event(events, event_type, payload),
+                memory_prompt_provider=lambda: memories.prompt_context(project.id),
+            )
+            if state:
+                agent.restore_state(state)
+            return WebSession(
+                agent,
+                events,
+                approvals,
+                workspace=project.workspace,
+                model_name=selected_model,
+                max_turns_per_prompt=config.max_turns,
+                allowed_models=config.allowed_models,
+                on_prompt_complete=on_complete,
+            )
+
+        session = WebWorkspaceManager(
+            paths=paths,
+            registry=registry,
+            sessions=session_repository,
+            memories=memories,
+            memory_service=MemoryService(memories, MemoryExtractor(memory_model)),
+            session_factory=session_factory,
+            events=events,
+            initial_workspace=workspace,
         )
     except (OSError, ValueError, ConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -166,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     access_token = secrets.token_urlsafe(32)
     console_url = local_console_url(args.port, access_token)
     print(f"MiniCodex workspace: {workspace}", flush=True)
+    trace_path = paths.session_root(session.active_project_id, session.active_session_id) / "trace.jsonl"
     print(f"Session trace: {trace_path}", flush=True)
     print(f"Web console: {console_url}", flush=True)
     try:

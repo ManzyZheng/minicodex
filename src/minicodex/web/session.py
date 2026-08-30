@@ -4,9 +4,9 @@ import threading
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
-from ..agent import AgentSession
+from ..agent import AgentOutcome, AgentSession
 from ..permissions import AgentMode, PlanState
 from .approval import ApprovalGate
 from .events import EventBus
@@ -38,6 +38,7 @@ class WebSession:
         model_name: str,
         max_turns_per_prompt: int,
         allowed_models: tuple[str, ...] | None = None,
+        on_prompt_complete: Callable[["WebSession", str, AgentOutcome], None] | None = None,
     ) -> None:
         self.agent = agent
         self.events = events
@@ -46,11 +47,14 @@ class WebSession:
         self.model_name = model_name
         self.allowed_models = allowed_models or (model_name,)
         self.max_turns_per_prompt = max_turns_per_prompt
+        self.on_prompt_complete = on_prompt_complete
         self._condition = threading.Condition()
         self._status = "IDLE"
         self._closed = False
         self._worker: threading.Thread | None = None
         self._pending_plan: PendingPlan | None = None
+        self._restored_file_changes: list[dict[str, Any]] = []
+        self._restored_verification_status = "NOT_RUN"
         self.events.publish(
             "session_started",
             {
@@ -66,7 +70,7 @@ class WebSession:
     def _verification_status(self) -> str:
         runtime = self.agent.tools
         if not runtime.change_seq:
-            return "NOT_RUN"
+            return self._restored_verification_status
         evidence = runtime.last_verification
         if evidence and evidence.get("change_seq") == runtime.change_seq:
             return str(evidence["status"])
@@ -97,7 +101,7 @@ class WebSession:
             "execution_mode": self.agent.execution_mode.value,
             "plan_state": self.agent.plan_state.value,
             "pending_plan": asdict(self._pending_plan) if self._pending_plan else None,
-            "file_changes": self.agent.tools.changes_snapshot(),
+            "file_changes": self._file_changes_snapshot(),
             "max_turns_per_prompt": self.max_turns_per_prompt,
             "prompt_count": self.agent.prompt_count,
             "event_id": event_id,
@@ -105,6 +109,16 @@ class WebSession:
             "references": self.agent.reference_metadata(),
             "context": self.agent.context_snapshot(),
         }
+
+    def restore_presentation_state(self, *, file_changes: list[dict[str, Any]], verification_status: str) -> None:
+        self._restored_file_changes = [dict(item) for item in file_changes if isinstance(item, dict)]
+        self._restored_verification_status = verification_status or "NOT_RUN"
+
+    def _file_changes_snapshot(self) -> list[dict[str, Any]]:
+        current = self.agent.tools.changes_snapshot()
+        merged = {(item.get("prompt_index"), item.get("path")): dict(item) for item in self._restored_file_changes}
+        merged.update({(item.get("prompt_index"), item.get("path")): dict(item) for item in current})
+        return list(merged.values())
 
     def interrupt(self) -> bool:
         with self._condition:
@@ -257,9 +271,17 @@ class WebSession:
 
     def _run_prompt(self, prompt: str) -> None:
         try:
-            self.agent.run_turn(prompt)
+            outcome = self.agent.run_turn(prompt)
             if self.agent.plan_state is PlanState.WAITING_APPROVAL and self._pending_plan is None:
                 self.mark_plan_ready(self.agent.pending_plan_text or "")
+            if self.on_prompt_complete is not None:
+                try:
+                    self.on_prompt_complete(self, prompt, outcome)
+                except Exception as exc:
+                    self.events.publish(
+                        "background_error",
+                        {"code": type(exc).__name__, "message": str(exc), "operation": "persist_and_extract_memory"},
+                    )
         except Exception as exc:
             self.events.publish("error", {"code": type(exc).__name__, "message": str(exc)})
         finally:

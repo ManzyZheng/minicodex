@@ -7,7 +7,8 @@
 ## 功能
 
 - 单 Agent 的 `model → tool calls → tool results → model` 循环。
-- 同一浏览器页面中的连续多轮会话：复用消息历史、已读文件集合、工作区修改状态和验证状态。
+- 多 Project、多 Session：项目注册表和会话状态写入应用数据目录；每个项目可创建、切换和恢复多个 Session，但全局同一时刻只允许一个 Agent 任务运行。
+- Global + Project 双 Scope 记忆：显式记住/忘记、每个用户任务完成后一次保守自动提取、证据校验、敏感信息过滤和重复抑制；两类有效记忆都会自动保存。
 - Codex 式本机 Web Console：以最终回答为主，过程默认折叠；文件变更卡片可打开右侧累计 Diff 审查，终端同步保留工具输出。
 - OpenAI-compatible Chat Completions Tool Calling；支持自定义 `base_url`。
 - Qwen thinking：非流式读取独立 `reasoning_content`，保留在终端和 JSONL Trace；Web 只显示模型主动给出的短进展与确定性工具摘要，不倾倒原始思维链。
@@ -51,10 +52,12 @@ ToolRuntime ── WorkspaceGuard ── PermissionPolicy
   └── shell command batch ── allow/review/ask/deny ── verification state
                               └── Permission Reviewer ── allow/escalate
 
-PromptContextBuilder ── static / environment / runtime
+PromptContextBuilder ── static / environment / runtime / memory
 ExternalReferenceRegistry ── exact-file read-only snapshots
 
-WebSession ── EventBus ── SSE ── Browser Timeline
+WebWorkspaceManager ── ProjectRegistry / SessionRepository / MemoryStore
+        │
+        └── WebSession ── EventBus ── SSE ── Browser Timeline
      └────── ApprovalGate ◀── HTTP approval response
 ```
 
@@ -71,6 +74,9 @@ WebSession ── EventBus ── SSE ── Browser Timeline
 - `prompting.py`：静态、Session、运行时和参考文件四层 Prompt 构造。
 - `references.py`：解析用户 `@` 引用、校验敏感/类型/大小限制并保存 Session 快照。
 - `session.py`：可逐行读取、可回放的 JSONL Trace。
+- `persistence.py`、`projects.py`、`project_sessions.py`：应用数据路径、原子 JSON、Project 注册表和 Session 状态仓库。
+- `memory/`：统一 Global/Project Memory、保守提取、证据验证、去重和 Prompt 索引。
+- `web/manager.py`：管理当前活动 Project/Session，强制全局单运行任务，并在每轮结束后持久化和提取记忆。
 - `web/session.py`：一个 Worker 串行执行多个 Prompt，保证同一时间只有一轮任务在修改工作区。
 - `web/events.py`：带递增 ID 的内存事件总线，支持 SSE 断线后通过 `Last-Event-ID` 补发事件。
 - `web/approval.py`：把阻塞式命令确认桥接为浏览器审批，超时默认拒绝。
@@ -100,10 +106,15 @@ minicodex/
 │   ├── prompting.py              # 分层 System/Session/Runtime/Reference Prompt
 │   ├── references.py             # 精确文件、只读、Session 级参考快照
 │   ├── context.py                # 工具输出截断和历史摘要
-│   └── session.py                # JSONL Session Trace
+│   ├── session.py                # JSONL Session Trace
+│   ├── persistence.py            # 应用数据目录与原子 JSON
+│   ├── projects.py               # 多 Project 注册表
+│   ├── project_sessions.py       # 多 Session 元数据与状态
+│   ├── memory/                   # 双 Scope 记忆、提取、验证与存储
 │   └── web/
 │       ├── app.py                # Prompt/审批 API、SSE 与静态文件路由
 │       ├── session.py            # 连续会话与单 Worker 编排
+│       ├── manager.py            # Project/Session 切换与单运行约束
 │       ├── events.py             # 可重放内存事件总线
 │       ├── approval.py           # 浏览器通用副作用审批门
 │       └── static/               # 原生 HTML/CSS/JS 执行时间线
@@ -147,6 +158,7 @@ minicodex/
 | `MINICODEX_ENABLE_THINKING` | 否 | `true/false`，控制 Qwen thinking 参数 |
 | `MINICODEX_REVIEWER_ENABLED` | 否 | 默认 `true`；是否为 AUTO-ACT 灰区命令启用独立审核请求 |
 | `MINICODEX_REVIEWER_MODEL` | 否 | Reviewer 模型；默认继承 `MINICODEX_MODEL`，审核请求始终关闭 thinking |
+| `MINICODEX_DATA_DIR` | 否 | Project、Session、Trace 和记忆的应用数据根目录；Windows 默认 `%LOCALAPPDATA%/MiniCodex` |
 
 ### `models.py`：统一消息模型
 
@@ -222,9 +234,32 @@ System Prompt 现在分为稳定规则、Session 环境快照和可更新的 Run
 
 Agent 还使用软 Turn 收敛提示：Turn 8 提醒合并改动并进入目标验证，Turn 12 要求收尾，Turn 16 要求只完成最终验证；一旦状态为 `VERIFIED`，下一轮优先要求直接给出最终答案。若仍有用户明确要求但尚未完成的交付项，模型可以继续；普通小修复不会自行扩展到版本升级、打包或部署调查。
 
+### 多 Project、多 Session 与双 Scope 记忆
+
+Web 启动时把 `--workspace` 注册为一个 Project；左侧栏可继续添加本地项目，并在每个项目下创建多个 Session。`WebWorkspaceManager` 只允许一个活动 Session 执行：运行、等待审批或停止过程中切换会返回 HTTP 409；空闲时切换会重新创建 `AgentSession`、`ToolRuntime`、审批门和中断标记，再从应用数据目录恢复对话、Prompt 计数、模型/模式、验证状态和累计 Diff。Read-before-edit 缓存、正在运行的进程、待审批请求和外部参考注册表不会跨进程恢复，避免把过期运行时能力带入新进程。
+
+记忆采用统一结构：`scope = global | project`，`kind = preference | decision | reference`。Global Memory 对所有项目可见，Project Memory 只注入当前项目；当前用户消息优先于记忆，项目记忆只在当前项目内覆盖全局偏好，任何记忆都不能授予权限、放宽 Workspace Boundary 或绕过 Shell 审核。Prompt 只注入有上限的记忆索引，总字符数默认不超过 12K。
+
+每个用户任务结束后，独立的 `MemoryExtractor` 使用同一供应商模型但关闭 thinking、不给工具，最多返回两条候选且允许空数组。候选必须引用最近用户消息中的连续原文；程序再验证 Scope 证据、长度、敏感信息和重复内容。有效的 Global 与 Project 候选都会自动保存；失败或坏 JSON 只产生后台事件，不改变主任务的 `COMPLETED/VERIFIED/FAILED` 状态。记忆正文会在后续请求中发送给配置的模型供应商，因此不应手动保存密钥、Token 或其他敏感内容。
+
+默认存储结构位于 `%LOCALAPPDATA%/MiniCodex`，可以通过 `MINICODEX_DATA_DIR` 覆盖：
+
+```text
+MiniCodex/
+├── registry.json
+├── memory/items/                 # Global Memory
+└── projects/<project-id>/
+    ├── project.json
+    ├── memory/items/             # Project Memory
+    └── sessions/<session-id>/
+        ├── metadata.json
+        ├── state.json
+        └── trace.jsonl
+```
+
 ### `session.py`：JSONL Trace
 
-每行是一个独立 JSON 事件，包含 UTC 时间、事件类型和 payload。主要事件包括 `session_start`、`model_reply`、`tool_result`、`model_error` 和 `final`。Trace 默认写入目标工作区的 `.minicodex/sessions/`，便于逐行查看和脚本分析；目录被 Git 忽略，因为记录可能包含本机路径和完整代码上下文。
+每行是一个独立 JSON 事件，包含 UTC 时间、事件类型和 payload。主要事件包括 `session_start`、`model_reply`、`tool_result`、`model_error` 和 `final`。终端单次运行仍可把 Trace 放在目标工作区；Web 多 Session 模式把每个 Trace 写入应用数据目录对应的 Session，避免污染或提交用户项目。Trace 可能包含本机路径和完整代码上下文，不应进入远程仓库。
 
 ## 六个工具
 
@@ -431,6 +466,6 @@ python -m pytest -q
 
 - `run_shell` 同时提供结构化 argv 与完整 Shell 字符串，但权限规则与 Reviewer 都是应用层保护，不是 OS 沙箱；获准进程仍可能以当前用户权限访问工作区外资源。
 - 不实现多 Agent、MCP、IDE 插件、技能系统或代码索引；Plan Mode 是同一 Session 中的只读/执行状态切换。
-- 历史压缩采用确定性摘要提示，不追求完整语义记忆；目标是清楚展示上下文治理机制。
+- 历史压缩仍采用确定性 Checkpoint；长期记忆只保存经过证据与安全校验的短偏好/决策/参考，不尝试把完整会话总结成知识库，也不使用向量检索。
 - 文件并发修改检测尚未加入，后续可用 SHA-256/mtime 版本令牌升级。
 - 服务关闭会拒绝新 Prompt、取消待审批命令并最多等待当前 Worker 2 秒；第三方模型 SDK 的同步请求和已启动子进程当前无法强制协作取消，超时后状态会明确保留为 `CLOSING`。正式版可进一步加入模型取消令牌和 Windows Job Object 终止子进程树。

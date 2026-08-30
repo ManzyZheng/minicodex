@@ -48,6 +48,18 @@ def test_openai_adapter_retries_transient_status_three_attempts() -> None:
     assert len(completions.calls) == 3
 
 
+def test_openai_adapter_omits_tool_fields_for_memory_extraction() -> None:
+    completions = FakeCompletions([response(content='{"candidates":[]}')])
+    model = OpenAIChatModel(client_with(completions), model="demo")
+
+    model.complete([{"role": "user", "content": "extract"}], [])
+
+    request = completions.calls[0]
+    assert "tools" not in request
+    assert "tool_choice" not in request
+    assert "parallel_tool_calls" not in request
+
+
 def test_openai_adapter_enables_qwen_thinking_in_extra_body() -> None:
     completions = FakeCompletions([response(content="ok", reasoning_content="inspect the failing test")])
     model = OpenAIChatModel(client_with(completions), model="qwen3.8-flash", enable_thinking=True)

@@ -500,12 +500,11 @@ minicodex-web = "minicodex.web_cli:main"
 
 ```text
 EventBus
-ApprovalGate（文件变化和命令）
-ToolRuntime
-OpenAIChatModel
+ApplicationPaths / ProjectRegistry / SessionRepository
+MemoryStore / MemoryService / 无 thinking MemoryExtractor
+WebWorkspaceManager
+  └── ApprovalGate / ToolRuntime / OpenAIChatModel / AgentSession / WebSession
 ModelPermissionReviewer（独立模型请求）
-AgentSession
-WebSession
 FastAPI app
 ```
 
@@ -528,11 +527,23 @@ FastAPI app
 
 所以“多轮”不是多个 Agent，而是同一个 Agent Session 连续接收多个用户指令。
 
-### 12.2 `EventBus`
+### 12.2 `WebWorkspaceManager` 与持久 Session
+
+[`web/manager.py`](src/minicodex/web/manager.py) 位于 FastAPI 和活动 `WebSession` 之间。它用 [`projects.py`](src/minicodex/projects.py) 注册多个 Workspace，用 [`project_sessions.py`](src/minicodex/project_sessions.py) 保存每个 Project 下的 Session 元数据与 Agent 对话状态。创建或切换 Session 前必须确认活动 Session 为 `IDLE`，因此多个 Session 可以存在和恢复，但不会并发修改 Workspace。
+
+每轮完成后，Manager 保存 `AgentSession.export_state()`、累计 Diff 和验证状态。恢复时重新创建工具运行时、审批门、中断标记和 Memory Prompt；不会恢复 Read-before-edit 缓存、子进程、待审批操作或其他瞬态权限状态。前端收到 `session_reset` 后清空当前 DOM，再用快照中的 `history` 重建用户与最终回答。
+
+### 12.3 Global / Project Memory
+
+[`memory/`](src/minicodex/memory) 用一个 `MemoryItem` 表达两种 Scope（`global/project`）和三种 Kind（`preference/decision/reference`）。`MemoryStore` 使用应用目录中的原子 JSON 文件；`MemoryExtractor` 在每个用户任务结束后独立调用同一模型，关闭 thinking 且不发送工具 Schema，最多产生两条、允许空数组。`MemoryService` 要求候选 evidence 和 scope evidence 都能在最近用户原文中逐字找到，再过滤密钥、大段代码、无效长度和重复内容。有效的 Global 与 Project Memory 都自动保存；任何提取异常只发布后台事件，不改变主任务终态。
+
+`AgentSession` 的第 4 条稳定 system layer 是有上限的 Memory Index。它不写入导出的对话历史，恢复时从当前 MemoryStore 重新生成。优先级固定为：系统安全规则 > 当前用户消息 > 当前项目记忆 > 全局记忆；记忆永远不能授予 ACT/AUTO-ACT、扩大 Workspace 或替 Shell 命令审批。
+
+### 12.4 `EventBus`
 
 [`web/events.py`](src/minicodex/web/events.py) 给每个事件递增 ID，保留最近 2,000 个事件，单条 JSON 约最多 32,000 字符。订阅者队列满时丢掉队列中最旧项；断线后可根据事件 ID 从保留窗口重放。
 
-### 12.3 SSE
+### 12.5 SSE
 
 [`web/app.py`](src/minicodex/web/app.py) 把事件编码为：
 
@@ -544,7 +555,7 @@ data: {"prompt_index":2,"path":"app.py","diff":"...","additions":1,"deletions":1
 
 SSE 只负责服务器到浏览器；Prompt 和审批决定仍用 HTTP POST。`event_timestamp` 取自服务端 `WebEvent`，前端用 `user_prompt → turn_completed` 的时间差显示真实耗时，所以刷新或重放不会重新从零计时。15 秒无事件时发送 heartbeat。浏览器自动带 `Last-Event-ID` 重连，服务端从下一个事件继续。
 
-### 12.4 `ApprovalGate`
+### 12.6 `ApprovalGate`
 
 [`web/approval.py`](src/minicodex/web/approval.py) 把 ToolRuntime 同步需要的通用 bool 回调桥接为异步页面操作：
 
@@ -557,7 +568,7 @@ SSE 只负责服务器到浏览器；Prompt 和审批决定仍用 HTTP POST。`e
 
 `ApprovalPrompt.kind` 区分 `command` 和 `file_change`；payload 同时带 summary、reason、risk、rule ID，文件变化还带 diff，命令带 command/purpose/signals/review。任一时刻只允许一个 pending approval。
 
-### 12.5 本机 HTTP 防护
+### 12.7 本机 HTTP 防护
 
 FastAPI 中间件要求：
 
@@ -572,8 +583,8 @@ FastAPI 中间件要求：
 
 前端没有框架，位于 [`web/static/`](src/minicodex/web/static)。
 
-- `index.html`：轻量顶栏、对话主栏、右侧审查区、Composer 和审批 Dialog。
-- `codex-app.css`：Codex 式信息层级、固定 Composer、桌面分栏和窄屏 Diff 抽屉。
+- `index.html`：轻量顶栏、最左 Project/Session 树、对话或记忆主栏、右侧审查区、Composer 和审批 Dialog。
+- `codex-app.css`：Codex 式信息层级、项目侧栏、固定 Composer、桌面三栏和窄屏 Diff 抽屉。
 - `markdown.js`：小型安全 Markdown 渲染器。
 - `codex-app.js`：HTTP、EventSource、对话状态、计划卡片、累计 Diff 和审批。
 
@@ -585,8 +596,10 @@ FastAPI 中间件要求：
 4. `openReview()/renderReview()`：打开右侧 Diff 并逐行着色；
 5. `renderFinal()/renderPlan()`：展示最终 Markdown 或待批准方案；
 6. `handlers/handleEvent()`：只映射产品事件；没有 `model_reasoning` handler；
-7. `loadSnapshot()/connectEvents()`：刷新恢复与 SSE；
-8. `submitPrompt()/resolvePlan()/decideApproval()`：HTTP POST 方向。
+7. `renderProjects()/activateSession()/hydrateHistory()`：项目树、会话切换和持久历史恢复；
+8. `openMemory()/loadMemories()/forgetMemory()`：Global/Project Memory 管理；
+9. `loadSnapshot()/connectEvents()`：刷新恢复与 SSE；
+10. `submitPrompt()/resolvePlan()/decideApproval()`：HTTP POST 方向。
 
 Markdown 渲染只用 `createElement`、`createTextNode`、`textContent` 和 `replaceChildren`，不把模型输出交给 `innerHTML`。因此 `<script>` 只会显示成文本。
 

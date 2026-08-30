@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
 
@@ -34,6 +35,23 @@ class ModeRequest(BaseModel):
 class PlanResolutionRequest(BaseModel):
     action: Literal["execute", "revise", "cancel"]
     feedback: str | None = None
+
+
+class ProjectRequest(BaseModel):
+    workspace: str
+    name: str | None = None
+
+
+class SessionRequest(BaseModel):
+    title: str = "新会话"
+
+
+class MemoryRequest(BaseModel):
+    scope: Literal["global", "project"]
+    kind: Literal["preference", "decision", "reference"]
+    title: str
+    content: str
+    project_id: str | None = None
 
 
 def format_sse_event(event: WebEvent) -> str:
@@ -78,6 +96,65 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
     @app.get("/api/session")
     def session_snapshot() -> dict:
         return web_session.snapshot()
+
+    @app.get("/api/projects")
+    def list_projects() -> dict:
+        provider = getattr(web_session, "projects_snapshot", None)
+        if not callable(provider):
+            snapshot = web_session.snapshot()
+            return {"projects": [], "active_project_id": None, "active_session_id": None, "legacy": snapshot}
+        return provider()
+
+    @app.post("/api/projects", status_code=status.HTTP_201_CREATED)
+    def register_project(body: ProjectRequest) -> dict:
+        try:
+            return asdict(web_session.register_project(body.workspace, name=body.name))
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/projects/{project_id}/sessions", status_code=status.HTTP_201_CREATED)
+    def create_session(project_id: str, body: SessionRequest) -> dict:
+        try:
+            return asdict(web_session.create_session(project_id, title=body.title))
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="project not found") from exc
+
+    @app.post("/api/projects/{project_id}/sessions/{session_id}/activate")
+    def activate_session(project_id: str, session_id: str) -> dict:
+        try:
+            return asdict(web_session.switch_session(project_id, session_id))
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+
+    @app.get("/api/memories")
+    def list_memories(scope: Literal["global", "project"], project_id: str | None = None) -> list[dict]:
+        provider = getattr(web_session, "list_memories", None)
+        if not callable(provider):
+            raise HTTPException(status_code=404, detail="memory is not available")
+        return [asdict(item) for item in provider(scope=scope, project_id=project_id)]
+
+    @app.post("/api/memories", status_code=status.HTTP_201_CREATED)
+    def remember(body: MemoryRequest) -> dict:
+        provider = getattr(web_session, "remember", None)
+        if not callable(provider):
+            raise HTTPException(status_code=404, detail="memory is not available")
+        try:
+            return asdict(provider(**body.model_dump()))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/api/memories/{memory_id}")
+    def forget_memory(memory_id: str, project_id: str | None = None) -> dict[str, str]:
+        provider = getattr(web_session, "forget_memory", None)
+        if not callable(provider) or not provider(memory_id, project_id=project_id):
+            raise HTTPException(status_code=404, detail="memory not found")
+        return {"status": "forgotten"}
 
     @app.post("/api/prompts", status_code=status.HTTP_202_ACCEPTED)
     def submit_prompt(body: PromptRequest) -> dict[str, str]:

@@ -50,3 +50,21 @@ def test_frontend_does_not_insert_untrusted_event_html() -> None:
     for script_name in ("codex-app.js", "markdown.js"):
         source = (static_dir / script_name).read_text(encoding="utf-8")
         assert ".innerHTML" not in source
+
+
+def test_project_session_and_memory_controls_are_present() -> None:
+    static_dir = Path(__file__).parents[1] / "src" / "minicodex" / "web" / "static"
+    html = (static_dir / "index.html").read_text(encoding="utf-8")
+    script = (static_dir / "codex-app.js").read_text(encoding="utf-8")
+
+    assert 'id="project-sidebar"' in html
+    assert 'id="project-list"' in html
+    assert 'id="new-project"' in html
+    assert 'id="global-memory"' in html
+    assert 'id="memory-view"' in html
+    assert 'id="memory-form"' in html
+    assert "/api/projects" in script
+    assert "/sessions/${encodeURIComponent(sessionId)}/activate" in script
+    assert "/api/memories" in script
+    assert "session_reset" in script
+    assert "memory_created" in script

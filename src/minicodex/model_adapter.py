@@ -63,10 +63,13 @@ class OpenAIChatModel:
                 request: dict[str, Any] = {
                     "model": self.model,
                     "messages": messages,
-                    "tools": tools,
-                    "tool_choice": "auto",
-                    "parallel_tool_calls": True,
                 }
+                if tools:
+                    request.update(
+                        tools=tools,
+                        tool_choice="auto",
+                        parallel_tool_calls=True,
+                    )
                 if self.enable_thinking:
                     request["extra_body"] = {"enable_thinking": True, "preserve_thinking": False}
                 response = self.client.chat.completions.create(**request)

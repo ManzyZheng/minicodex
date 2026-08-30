@@ -75,6 +75,7 @@ class AgentSession:
         trace: SessionTrace | None = None,
         on_tool_result: Callable[[ToolResult], None] | None = None,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        memory_prompt_provider: Callable[[], str] | None = None,
     ) -> None:
         self.model = model
         self.tools = tools
@@ -82,6 +83,7 @@ class AgentSession:
         self.trace = trace
         self.on_tool_result = on_tool_result
         self.on_event = on_event
+        self.memory_prompt_provider = memory_prompt_provider or (lambda: "")
         initial_mode = self.tools.mode
         self.execution_mode = AgentMode.ACT if initial_mode is AgentMode.PLAN else initial_mode
         self.plan_state = PlanState.PLANNING if initial_mode is AgentMode.PLAN else PlanState.INACTIVE
@@ -92,6 +94,7 @@ class AgentSession:
             {"role": "system", "content": build_static_prompt()},
             {"role": "system", "content": build_session_prompt(environment)},
             {"role": "system", "content": ""},
+            {"role": "system", "content": ""},
         ]
         self._reference_messages: list[dict[str, Any]] = []
         self.context = ContextManager()
@@ -100,6 +103,53 @@ class AgentSession:
         self.tools.set_interrupt_checker(self._interrupt_event.is_set)
         self._apply_effective_mode(emit=False)
         self.prompt_count = 0
+        self.last_memory_extracted_prompt_index = 0
+        self._refresh_memory_prompt()
+
+    @property
+    def _persistent_message_offset(self) -> int:
+        return 4
+
+    def _refresh_memory_prompt(self) -> None:
+        try:
+            content = self.memory_prompt_provider() or ""
+        except Exception as exc:
+            content = f"Memory context is temporarily unavailable: {type(exc).__name__}."
+        self.messages[3]["content"] = content
+
+    def export_state(self) -> dict[str, Any]:
+        return {
+            "messages": [dict(message) for message in self.messages[self._persistent_message_offset :]],
+            "prompt_count": self.prompt_count,
+            "execution_mode": self.execution_mode.value,
+            "last_memory_extracted_prompt_index": self.last_memory_extracted_prompt_index,
+        }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        raw_messages = state.get("messages", [])
+        restored = [dict(message) for message in raw_messages if isinstance(message, dict) and message.get("role")]
+        self.messages = self.messages[: self._persistent_message_offset] + restored
+        self.prompt_count = max(0, int(state.get("prompt_count", 0)))
+        self.last_memory_extracted_prompt_index = max(0, int(state.get("last_memory_extracted_prompt_index", 0)))
+        try:
+            mode = AgentMode(str(state.get("execution_mode", self.execution_mode.value)))
+        except ValueError:
+            mode = self.execution_mode
+        if mode is AgentMode.PLAN:
+            mode = AgentMode.ACT
+        self.execution_mode = mode
+        self.plan_state = PlanState.INACTIVE
+        self.pending_plan_text = None
+        self._reference_messages = []
+        self._refresh_memory_prompt()
+        self._apply_effective_mode(emit=False)
+
+    def history_snapshot(self) -> list[dict[str, Any]]:
+        return [
+            {"role": message.get("role"), "content": message.get("content", "")}
+            for message in self.messages[self._persistent_message_offset :]
+            if message.get("role") in {"user", "assistant"} and not message.get("tool_calls")
+        ]
 
     def set_mode(self, mode: AgentMode, *, emit: bool = True) -> None:
         if mode is AgentMode.PLAN:
@@ -136,6 +186,7 @@ class AgentSession:
             verification_status=self._verification_status(),
             turn_in_prompt=self._active_turn,
         )
+        self._refresh_memory_prompt()
 
     def reference_metadata(self) -> list[dict[str, Any]]:
         return self.references.metadata()
