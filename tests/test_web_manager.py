@@ -45,7 +45,7 @@ class BlockingModel:
         return ModelReply(content="完成")
 
 
-def make_manager(tmp_path: Path, *, task_model=None):
+def make_manager(tmp_path: Path, *, task_model=None, with_project: bool = True):
     paths = ApplicationPaths(tmp_path / "data")
     registry = ProjectRegistry(paths)
     repository = SessionRepository(paths)
@@ -88,9 +88,51 @@ def make_manager(tmp_path: Path, *, task_model=None):
         memory_service=MemoryService(store, MemoryExtractor(memory_model)),
         session_factory=factory,
         events=events,
-        initial_workspace=tmp_path / "workspace",
+        initial_workspace=(tmp_path / "workspace") if with_project else None,
     )
     return manager, memory_model
+
+
+def test_manager_starts_on_project_home_and_activates_the_first_added_project(tmp_path: Path) -> None:
+    manager, _memory_model = make_manager(tmp_path, with_project=False)
+
+    initial = manager.snapshot()
+    assert initial["status"] == "NO_PROJECT"
+    assert initial["active_project_id"] is None
+    assert initial["active_session_id"] is None
+    assert initial["projects"] == []
+
+    workspace = tmp_path / "booknest"
+    workspace.mkdir()
+    project = manager.register_project(str(workspace), name="BookNest")
+
+    assert manager.active_project_id == project.id
+    assert manager.active_session_id is not None
+    assert manager.snapshot()["workspace"] == str(workspace.resolve())
+
+
+def test_project_home_api_rejects_agent_actions_until_a_project_is_selected(tmp_path: Path) -> None:
+    manager, _memory_model = make_manager(tmp_path, with_project=False)
+    client = TestClient(create_app(manager, access_token="token"), base_url="http://127.0.0.1")
+    api = lambda path: f"{path}{'&' if '?' in path else '?'}token=token"
+
+    snapshot = client.get(api("/api/session"))
+    prompt = client.post(api("/api/prompts"), json={"text": "创建项目"})
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["status"] == "NO_PROJECT"
+    assert prompt.status_code == 409
+    assert "project" in prompt.json()["detail"].lower()
+
+
+def test_project_home_can_manage_global_memory_without_an_active_session(tmp_path: Path) -> None:
+    manager, _memory_model = make_manager(tmp_path, with_project=False)
+
+    item = manager.remember(scope="global", kind="preference", title="语言", content="默认中文")
+
+    assert manager.list_memories(scope="global")[0].id == item.id
+    assert item.source_session_id is None
+    assert item.source_prompt_index == 0
 
 
 def test_manager_creates_switches_and_restores_sessions(tmp_path: Path) -> None:

@@ -12,6 +12,12 @@ def test_web_cli_exposes_only_local_port_configuration() -> None:
     assert args.max_turns == 50
 
 
+def test_web_cli_can_start_on_the_project_home_without_a_workspace() -> None:
+    args = build_parser().parse_args([])
+
+    assert args.workspace is None
+
+
 def test_serve_always_binds_to_loopback(monkeypatch) -> None:
     captured = {}
 

@@ -31,7 +31,7 @@ class WebWorkspaceManager:
         memory_service: MemoryService,
         session_factory: SessionFactory,
         events: EventBus,
-        initial_workspace: str | Path,
+        initial_workspace: str | Path | None = None,
     ) -> None:
         self.paths = paths
         self.registry = registry
@@ -42,19 +42,24 @@ class WebWorkspaceManager:
         self.events = events
         self._lock = threading.RLock()
         self._active: WebSession | None = None
-        project = self.registry.register(initial_workspace)
-        records = self.sessions.list(project.id)
-        record = next((item for item in records if item.id == project.last_session_id), None)
-        if record is None:
-            record = records[0] if records else self.sessions.create(project.id)
-        self.active_project_id = project.id
-        self.active_session_id = record.id
-        self._activate(project, record, initial=True)
+        self.active_project_id: str | None = None
+        self.active_session_id: str | None = None
+        if initial_workspace is not None:
+            project = self.registry.register(initial_workspace)
+            records = self.sessions.list(project.id)
+            record = next((item for item in records if item.id == project.last_session_id), None)
+            if record is None:
+                record = records[0] if records else self.sessions.create(project.id)
+            self._activate(project, record, initial=True)
+
+    @property
+    def has_active_session(self) -> bool:
+        return self._active is not None
 
     @property
     def active(self) -> WebSession:
         if self._active is None:
-            raise RuntimeError("no active session")
+            raise SessionBusyError("select or add a project before running the Agent")
         return self._active
 
     def __getattr__(self, name: str):
@@ -63,6 +68,8 @@ class WebWorkspaceManager:
         return getattr(self.active, name)
 
     def _ensure_idle(self) -> None:
+        if self._active is None:
+            return
         if self.active.snapshot()["status"] != "IDLE":
             raise SessionBusyError("stop the running Agent before changing project or session")
 
@@ -94,6 +101,23 @@ class WebWorkspaceManager:
         }
 
     def snapshot(self) -> dict[str, Any]:
+        if self._active is None:
+            return {
+                **self.projects_snapshot(),
+                "workspace": None,
+                "model": None,
+                "allowed_models": [],
+                "status": "NO_PROJECT",
+                "verification_status": "NOT_RUN",
+                "execution_mode": "act",
+                "plan_state": "inactive",
+                "pending_plan": None,
+                "pending_approval": None,
+                "file_changes": [],
+                "references": [],
+                "history": [],
+                "event_id": self.events.latest_id(),
+            }
         snapshot = self.active.snapshot()
         snapshot.update(self.projects_snapshot())
         snapshot["history"] = self.active.agent.history_snapshot()
@@ -117,8 +141,8 @@ class WebWorkspaceManager:
             record = self.sessions.create(
                 project.id,
                 title=title,
-                model=self.active.model_name,
-                mode=self.active.agent.execution_mode.value,
+                model=self.active.model_name if self._active is not None else None,
+                mode=self.active.agent.execution_mode.value if self._active is not None else "act",
             )
             self._activate(project, record)
             return record
@@ -195,7 +219,7 @@ class WebWorkspaceManager:
             content=content,
             source="manual",
             source_session_id=self.active_session_id,
-            source_prompt_index=self.active.agent.prompt_count,
+            source_prompt_index=self.active.agent.prompt_count if self._active is not None else 0,
         )
         self.events.publish("memory_created", asdict(item))
         return item

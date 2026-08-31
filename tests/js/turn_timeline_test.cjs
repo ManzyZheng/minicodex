@@ -44,7 +44,7 @@ global.fetch = async (url, options = {}) => {
   return {
     ok: status < 400,
     status,
-    async json() { return {workspace: "C:/demo", model: "demo", allowed_models: ["demo"], verification_status: "NOT_RUN", status: "IDLE", execution_mode: "auto-act", plan_state: "inactive", pending_plan: null, file_changes: [], references: [], event_id: 0}; },
+    async json() { return {workspace: "C:/demo", model: "demo", allowed_models: ["demo"], verification_status: "NOT_RUN", status: "IDLE", execution_mode: "auto-act", plan_state: "inactive", pending_plan: null, file_changes: [], references: [], event_id: 0, active_project_id: "project-demo", active_session_id: "session-demo", projects: []}; },
     async text() { return `status ${status}`; },
   };
 };

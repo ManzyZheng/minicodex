@@ -61,6 +61,10 @@ def format_sse_event(event: WebEvent) -> str:
 
 
 def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
+    def require_active_session() -> None:
+        if getattr(web_session, "has_active_session", True) is False:
+            raise HTTPException(status_code=409, detail="select or add a project before running the Agent")
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         yield
@@ -158,6 +162,7 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
 
     @app.post("/api/prompts", status_code=status.HTTP_202_ACCEPTED)
     def submit_prompt(body: PromptRequest) -> dict[str, str]:
+        require_active_session()
         if not body.text.strip():
             raise HTTPException(status_code=422, detail="prompt must not be empty")
         try:
@@ -171,12 +176,14 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
 
     @app.post("/api/interrupt", status_code=status.HTTP_202_ACCEPTED)
     def interrupt_prompt() -> dict[str, str]:
+        require_active_session()
         if not web_session.interrupt():
             raise HTTPException(status_code=409, detail="no Agent prompt is currently running")
         return {"status": "stopping"}
 
     @app.post("/api/mode")
     def change_mode(body: ModeRequest) -> dict[str, str]:
+        require_active_session()
         try:
             mode = web_session.set_mode(body.mode)
         except SessionBusyError as exc:
@@ -185,6 +192,7 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
 
     @app.post("/api/plans/approve", status_code=status.HTTP_202_ACCEPTED)
     def approve_plan(body: ModeRequest) -> dict[str, str]:
+        require_active_session()
         try:
             web_session.approve_plan(body.mode)
         except SessionBusyError as exc:
@@ -195,6 +203,7 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
 
     @app.post("/api/plans/{plan_id}/resolve", status_code=status.HTTP_202_ACCEPTED)
     def resolve_plan(plan_id: str, body: PlanResolutionRequest) -> dict[str, str]:
+        require_active_session()
         try:
             web_session.resolve_plan(plan_id, body.action, body.feedback)
         except (SessionBusyError, PlanResolutionError) as exc:
@@ -205,12 +214,14 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
 
     @app.post("/api/approvals/{request_id}")
     def resolve_approval(request_id: str, body: ApprovalDecision) -> dict[str, str]:
+        require_active_session()
         if not web_session.resolve_approval(request_id, body.allow):
             raise HTTPException(status_code=409, detail="approval is missing, stale, or already resolved")
         return {"status": "resolved"}
 
     @app.delete("/api/references/{reference_id}")
     def remove_reference(reference_id: str) -> dict[str, str]:
+        require_active_session()
         try:
             removed = web_session.remove_reference(reference_id)
         except SessionBusyError as exc:

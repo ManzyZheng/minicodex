@@ -28,7 +28,7 @@ from .web.session import WebSession
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="minicodex-web", description="Run the local MiniCodex web console.")
-    parser.add_argument("--workspace", default=".", help="project directory (default: current directory)")
+    parser.add_argument("--workspace", help="project directory; omit to open the project home")
     parser.add_argument("--model", help="model name; otherwise MINICODEX_MODEL")
     parser.add_argument("--max-turns", type=int, default=50, help="maximum model turns per prompt (default: 50)")
     parser.add_argument("--port", type=int, default=8000, help="loopback port (default: 8000)")
@@ -119,8 +119,8 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --port must be between 1 and 65535", file=sys.stderr)
         return 2
     try:
-        workspace = Path(args.workspace).resolve(strict=True)
-        if not workspace.is_dir():
+        workspace = Path(args.workspace).resolve(strict=True) if args.workspace else None
+        if workspace is not None and not workspace.is_dir():
             raise ValueError("workspace is not a directory")
         config = Config.from_env(model=args.model, max_turns=args.max_turns)
         paths = ApplicationPaths()
@@ -195,9 +195,12 @@ def main(argv: list[str] | None = None) -> int:
 
     access_token = secrets.token_urlsafe(32)
     console_url = local_console_url(args.port, access_token)
-    print(f"MiniCodex workspace: {workspace}", flush=True)
-    trace_path = paths.session_root(session.active_project_id, session.active_session_id) / "trace.jsonl"
-    print(f"Session trace: {trace_path}", flush=True)
+    if workspace is None:
+        print("MiniCodex project home: select or add a project in the web console", flush=True)
+    else:
+        print(f"MiniCodex workspace: {workspace}", flush=True)
+        trace_path = paths.session_root(session.active_project_id, session.active_session_id) / "trace.jsonl"
+        print(f"Session trace: {trace_path}", flush=True)
     print(f"Web console: {console_url}", flush=True)
     try:
         serve(create_app(session, access_token=access_token), args.port)

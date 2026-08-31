@@ -531,6 +531,8 @@ FastAPI app
 
 [`web/manager.py`](src/minicodex/web/manager.py) 位于 FastAPI 和活动 `WebSession` 之间。它用 [`projects.py`](src/minicodex/projects.py) 注册多个 Workspace，用 [`project_sessions.py`](src/minicodex/project_sessions.py) 保存每个 Project 下的 Session 元数据与 Agent 对话状态。创建或切换 Session 前必须确认活动 Session 为 `IDLE`，因此多个 Session 可以存在和恢复，但不会并发修改 Workspace。
 
+`minicodex-web` 不传 `--workspace` 时，Manager 允许 `active_project_id / active_session_id / _active` 都为空，并返回 `NO_PROJECT` 快照。该状态只允许列出/添加 Project 和管理 Global Memory；Prompt、模式、审批和参考文件 API 统一返回 409。用户选择已有 Session、添加 Project 或在项目标题右侧新建 Session 后，Manager 才调用 `session_factory` 建立 WorkspaceGuard、工具运行时和 Agent。这样 Project 选择属于受信任的应用控制面，不会让模型通过普通对话改变 Workspace Boundary。
+
 每轮完成后，Manager 保存 `AgentSession.export_state()`、累计 Diff 和验证状态。恢复时重新创建工具运行时、审批门、中断标记和 Memory Prompt；不会恢复 Read-before-edit 缓存、子进程、待审批操作或其他瞬态权限状态。前端收到 `session_reset` 后清空当前 DOM，再用快照中的 `history` 重建用户与最终回答。
 
 ### 12.3 Global / Project Memory

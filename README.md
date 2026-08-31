@@ -368,10 +368,18 @@ Allow? [y/N]
 ### 本机连续会话模式
 
 ```powershell
+minicodex-web
+```
+
+不传 `--workspace` 时先进入项目主页，不创建 Agent，也不会把启动目录隐式授权为 Workspace。点击左侧“＋”添加一个已经存在的本地文件夹；Project 名称默认取文件夹名。项目卡片依次显示“项目名 + 右侧新建 Session”、Workspace 路径、会话列表和项目记忆。添加项目后自动创建初始 Session；以后可在项目标题右侧继续新建 Session，它们保存独立对话、Trace 和验证状态，但串行操作同一个 Workspace。
+
+录制 Demo 或已经知道目标目录时，仍可快速打开：
+
+```powershell
 minicodex-web --workspace .\demo\buggy_expense_tracker --mode auto-act --port 8000
 ```
 
-启动后终端会打印形如 `http://127.0.0.1:8000/?token=...` 的随机会话 URL，请使用这一整条地址。服务端固定绑定 loopback，不提供 `--host` 参数，因此不会直接暴露给局域网或公网。页面关闭不会清空服务端 Session；只要进程未退出，重新打开页面仍能继续使用同一个 Agent 和 Workspace。事件总线保留最近 2,000 个事件，刷新或断线重连后可以重新渲染保留窗口内的执行卡片。
+启动后终端会打印形如 `http://127.0.0.1:8000/?token=...` 的随机会话 URL，请使用这一整条地址。带 `--workspace` 时注册并恢复该 Project；不带时只加载 Project Registry，直到用户选择 Session 或添加 Project 后才创建 `AgentSession`、工具运行时和 Workspace Boundary。服务端固定绑定 loopback，不提供 `--host` 参数，因此不会直接暴露给局域网或公网。页面关闭不会清空服务端 Session；只要进程未退出，重新打开页面仍能继续使用同一个 Agent 和 Workspace。事件总线保留最近 2,000 个事件，刷新或断线重连后可以重新渲染保留窗口内的执行卡片。
 
 本机服务仍按不可信 HTTP 接口防护：每次启动生成 256-bit 级随机令牌，所有 `/api/*` 与 SSE 请求都必须携带；服务同时拒绝非 loopback `Host`、跨站 `Origin`，并设置 CSP、`no-referrer` 和 `nosniff`。这能阻断普通恶意网页与 DNS rebinding 直接读取事件或替用户批准命令。令牌只应保留在本机终端和地址栏，不要复制到截图、日志或他人可访问的位置；拥有该 URL 的本机进程或浏览器扩展仍应视为拥有本次 Agent 会话权限。
 

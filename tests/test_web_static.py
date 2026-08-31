@@ -68,3 +68,8 @@ def test_project_session_and_memory_controls_are_present() -> None:
     assert "/api/memories" in script
     assert "session_reset" in script
     assert "memory_created" in script
+    assert '"project-session-add"' in script
+    assert '"project-workspace"' in script
+    assert '"project-section-label"' in script
+    assert '"＋ 新建 Session"' in script
+    assert script.index('"project-session-add"') < script.index('"project-workspace"')

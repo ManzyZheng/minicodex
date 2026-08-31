@@ -59,13 +59,14 @@ function setStatus(value) {
   statusNode.textContent = status;
   statusNode.dataset.status = status;
   const busy = BUSY_STATUSES.has(status);
-  promptInput.disabled = busy;
+  const noProject = status === "NO_PROJECT";
+  promptInput.disabled = busy || noProject;
   const interruptible = INTERRUPTIBLE_STATUSES.has(status);
   sendButton.textContent = interruptible || status === "STOPPING" ? "■" : "↑";
   sendButton.dataset.action = interruptible ? "stop" : (status === "STOPPING" ? "stopping" : "send");
-  sendButton.disabled = status === "STOPPING" || (busy && !interruptible);
-  permissionSelect.disabled = busy;
-  modelSelect.disabled = busy || modelSelect.children.length < 2;
+  sendButton.disabled = noProject || status === "STOPPING" || (busy && !interruptible);
+  permissionSelect.disabled = busy || noProject;
+  modelSelect.disabled = busy || noProject || modelSelect.children.length < 2;
 }
 
 function setVerification(value) {
@@ -93,6 +94,18 @@ function resetConversation() {
   empty.append(element("div", "empty-mark", "M"), element("h1", "", "开始一个代码任务"), element("p", "", "让 MiniCodex 检查代码、修改文件并运行验证。"));
   conversation.append(empty);
   closeReview();
+}
+
+function showProjectHome(hasProjects) {
+  resetConversation();
+  const empty = $("#empty-state");
+  empty.replaceChildren(
+    element("div", "empty-mark", "M"),
+    element("h1", "", hasProjects ? "选择一个 Session" : "添加第一个项目"),
+    element("p", "", hasProjects
+      ? "从左侧选择已有 Session，或在项目标题右侧新建 Session。"
+      : "点击左侧项目栏的＋，添加一个本地 Workspace 文件夹。"),
+  );
 }
 
 function hydrateHistory(history, verification) {
@@ -603,18 +616,23 @@ function setModels(models, selected) {
 
 function renderProjects(data) {
   state.projects = Array.isArray(data.projects) ? data.projects : [];
-  state.activeProjectId = data.active_project_id || state.activeProjectId;
-  state.activeSessionId = data.active_session_id || state.activeSessionId;
+  state.activeProjectId = data.active_project_id ?? null;
+  state.activeSessionId = data.active_session_id ?? null;
   if (!projectList) return;
   projectList.replaceChildren();
   state.projects.forEach((project) => {
     const group = element("section", "project-group");
-    const title = element("div", "project-title");
-    title.append(element("span", "", `▾ ${project.name}`));
-    const memory = element("button", "project-memory", "记忆");
-    memory.type = "button";
-    memory.addEventListener("click", (event) => { event.stopPropagation(); openMemory("project", project.id).catch(reportError); });
-    title.append(memory);
+    if (project.id === state.activeProjectId) group.classList.add("active");
+    const header = element("div", "project-header");
+    const title = element("div", "project-title", project.name);
+    const add = element("button", "project-session-add", "＋ 新建 Session");
+    add.type = "button";
+    add.disabled = BUSY_STATUSES.has(state.status);
+    add.addEventListener("click", () => createSession(project.id).catch(reportError));
+    header.append(title, add);
+    const workspace = element("div", "project-workspace", project.workspace || "");
+    workspace.title = project.workspace || "";
+    const sectionLabel = element("div", "project-section-label", "会话");
     const sessions = element("div", "session-list");
     (project.sessions || []).forEach((session) => {
       const button = element("button", `session-link${session.id === state.activeSessionId ? " active" : ""}`, session.title || "新会话");
@@ -624,12 +642,10 @@ function renderProjects(data) {
       button.addEventListener("click", () => activateSession(project.id, session.id).catch(reportError));
       sessions.append(button);
     });
-    const add = element("button", "new-session", "＋ 新建会话");
-    add.type = "button";
-    add.disabled = BUSY_STATUSES.has(state.status);
-    add.addEventListener("click", () => createSession(project.id).catch(reportError));
-    sessions.append(add);
-    group.append(title, sessions);
+    const memory = element("button", "project-memory", "◇ 项目记忆");
+    memory.type = "button";
+    memory.addEventListener("click", (event) => { event.stopPropagation(); openMemory("project", project.id).catch(reportError); });
+    group.append(header, workspace, sectionLabel, sessions, memory);
     projectList.append(group);
   });
 }
@@ -652,7 +668,7 @@ async function activateSession(projectId, sessionId) {
 }
 
 async function registerProject() {
-  const workspace = window.prompt("输入本地项目绝对路径");
+  const workspace = window.prompt("添加项目：输入本地 Workspace 文件夹绝对路径");
   if (!workspace || !workspace.trim()) return;
   await postJson("/api/projects", {workspace: workspace.trim()});
   resetConversation();
@@ -725,11 +741,19 @@ async function loadSnapshot() {
   if (!response.ok) throw new Error(`session snapshot failed: ${response.status}`);
   const data = await response.json();
   state.latestEventId = Math.max(state.latestEventId, Number(data.event_id || 0));
+  renderProjects(data);
+  if (!data.active_project_id || !data.active_session_id) {
+    setWorkspace("");
+    setVerification(data.verification_status);
+    setModels([], null);
+    showProjectHome(state.projects.length > 0);
+    setStatus("NO_PROJECT");
+    return data;
+  }
   setWorkspace(data.workspace);
   setPermission(data.execution_mode || (data.mode === "auto-act" ? "auto-act" : "act"));
   setModels(data.allowed_models, data.model);
   setVerification(data.verification_status);
-  renderProjects(data);
   hydrateHistory(data.history, data.verification_status);
   (data.file_changes || []).forEach(rememberChange);
   state.references.clear();
