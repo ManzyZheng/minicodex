@@ -48,6 +48,19 @@ def test_event_bus_bounds_history_and_entire_payload() -> None:
     assert len(retained[0].payload["preview"]) <= 120
 
 
+def test_event_bus_notifies_and_removes_synchronous_listeners() -> None:
+    bus = EventBus()
+    received = []
+    listener_id = bus.add_listener(received.append)
+
+    event = bus.publish("user_prompt", {"text": "hello"})
+    assert received == [event]
+
+    assert bus.remove_listener(listener_id) is True
+    bus.publish("status", {"value": "IDLE"})
+    assert received == [event]
+
+
 def test_async_subscription_replays_and_unregisters() -> None:
     async def scenario() -> None:
         bus = EventBus()

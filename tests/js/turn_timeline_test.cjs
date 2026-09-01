@@ -29,7 +29,7 @@ class FakeNode {
 }
 
 const nodes = {};
-for (const id of ["conversation", "conversation-scroll", "conversation-nav", "scroll-to-bottom", "prompt-input", "send-button", "session-status", "approval-dialog", "app-layout", "workspace-name", "workspace-path", "verification-status", "approval-purpose", "approval-command", "approval-timeout", "approval-title", "permission-select", "model-select", "allow-command", "reject-command", "prompt-form", "review-panel", "review-file-list", "review-diff", "review-title", "close-review", "empty-state", "session-references", "reference-summary", "reference-list"]) nodes[id] = new FakeNode(id === "approval-dialog" ? "dialog" : "div", id);
+for (const id of ["conversation", "conversation-scroll", "conversation-nav", "scroll-to-bottom", "prompt-input", "send-button", "session-status", "approval-dialog", "app-layout", "workspace-name", "workspace-path", "verification-status", "approval-purpose", "approval-command", "approval-timeout", "approval-title", "permission-select", "model-select", "allow-command", "reject-command", "prompt-form", "review-panel", "review-file-list", "review-diff", "review-title", "close-review", "empty-state", "session-references", "reference-summary", "reference-list", "memory-view", "memory-list", "memory-toast", "project-list"]) nodes[id] = new FakeNode(id === "approval-dialog" ? "dialog" : "div", id);
 nodes.conversation.append(nodes["empty-state"]);
 nodes["conversation-scroll"].clientHeight = 400;
 nodes["conversation-scroll"].scrollHeight = 1200;
@@ -38,13 +38,29 @@ global.window = { location: {search: "?token=test"} };
 global.document = { querySelector(selector) { return selector.startsWith("#") ? nodes[selector.slice(1)] || null : null; }, createElement(tagName) { return new FakeNode(tagName); }, createTextNode(text) { const node = new FakeNode(null); node.textContent = text; return node; } };
 const fetchCalls = [];
 let interruptStatus = 200;
+let transcriptEvents = [];
 global.fetch = async (url, options = {}) => {
   fetchCalls.push({url, options});
   const status = url.includes("/api/interrupt") ? interruptStatus : 200;
   return {
     ok: status < 400,
     status,
-    async json() { return {workspace: "C:/demo", model: "demo", allowed_models: ["demo"], verification_status: "NOT_RUN", status: "IDLE", execution_mode: "auto-act", plan_state: "inactive", pending_plan: null, file_changes: [], references: [], event_id: 0, active_project_id: "project-demo", active_session_id: "session-demo", projects: []}; },
+    async json() {
+      if (url.includes("/api/transcript")) {
+        const requestUrl = new URL(url, "http://localhost");
+        const limit = Number(requestUrl.searchParams.get("limit") || 100);
+        const beforeSeq = requestUrl.searchParams.get("before_seq");
+        const eligible = transcriptEvents.filter((event) => beforeSeq === null || event.seq < Number(beforeSeq));
+        const events = eligible.slice(-limit);
+        const firstSeq = events.length ? events[0].seq : null;
+        return {
+          events,
+          has_more: firstSeq !== null && transcriptEvents.some((event) => event.seq < firstSeq),
+          next_before_seq: firstSeq,
+        };
+      }
+      return {workspace: "C:/demo", model: "demo", allowed_models: ["demo"], verification_status: "NOT_RUN", status: "IDLE", execution_mode: "auto-act", plan_state: "inactive", pending_plan: null, file_changes: [], references: [], event_id: 0, active_project_id: "project-demo", active_session_id: "session-demo", projects: []};
+    },
     async text() { return `status ${status}`; },
   };
 };
@@ -73,6 +89,8 @@ setImmediate(async () => {
   }
   app.handleEvent("final_answer", {text: "已修复。", turns: 4, verification_status: "VERIFIED"});
   app.handleEvent("turn_completed", {text: "已修复。", turns: 4, verification_status: "VERIFIED", event_timestamp: "2026-08-27T10:17:10Z"});
+  app.handleEvent("memory_created", {id: "mem-global", scope: "global", title: "回答语言", content: "默认使用中文回答。", source_prompt_index: 1});
+  app.handleEvent("memory_created", {id: "mem-project", scope: "project", title: "依赖约定", content: "只使用标准库。", source_prompt_index: 1});
 
   const turns = nodes.conversation.querySelectorAll(".turn");
   assert.equal(turns.length, 1);
@@ -100,6 +118,12 @@ setImmediate(async () => {
   earlierToggle.click();
   assert.equal(modelSteps[0].hidden, false);
   assert.match(turns[0].querySelector(".final-answer").textContent, /已修复/);
+  const memoryNotices = turns[0].querySelectorAll(".memory-notice");
+  assert.equal(memoryNotices.length, 2);
+  assert.match(memoryNotices[0].textContent, /已保存到全局记忆.*回答语言/);
+  assert.match(memoryNotices[1].textContent, /已保存到项目记忆.*依赖约定/);
+  assert.equal(memoryNotices[0].classList.contains("global"), true);
+  assert.equal(memoryNotices[1].classList.contains("project"), true);
   assert.doesNotMatch(nodes.conversation.textContent, /raw private reasoning/);
   assert.match(turns[0].textContent, /Model Turn 4 · VERIFIED/);
   assert.equal(turns[0].querySelectorAll(".change-file").length, 3);
@@ -130,10 +154,24 @@ setImmediate(async () => {
   assert.match(noChangeTurn.querySelector(".no-changes").textContent, /本轮未修改文件/);
   app.handleEvent("user_prompt", {prompt_index: 4, text: "继续长会话"});
   app.handleEvent("tool_summary", {text: "已读取 config.py", tool: "read_file", turn: 1, detail: {call_id: "read-config", data: {path: "config.py"}}});
-  app.handleEvent("context_compacted", {before_messages: 28, after_messages: 15, before_chars: 111300, after_chars: 58000, stages: ["budget", "stale_snip", "auto_compact"]});
+  app.handleEvent("context_compacted", {
+    before_messages: 28,
+    after_messages: 15,
+    before_chars: 111300,
+    after_chars: 58000,
+    before_tokens: 31200,
+    after_tokens: 18500,
+    stages: ["budget", "stale_snip", "auto_compact"],
+  });
   const compactedTurn = nodes.conversation.querySelectorAll(".turn")[3];
   assert.equal(compactedTurn.querySelector(".model-step-progress").textContent, "");
-  assert.match(compactedTurn.querySelector(".process").textContent, /上下文已压缩 · 111\.3K → 58\.0K 字符/);
+  assert.match(compactedTurn.querySelector(".process").textContent, /上下文已压缩 · 31\.2K → 18\.5K tokens/);
+  const compactedActivities = compactedTurn.querySelectorAll(".activity-item");
+  const compactedDetail = JSON.parse(compactedActivities[compactedActivities.length - 1].children[1].textContent);
+  assert.equal(compactedDetail.before_tokens, 31200);
+  assert.equal(compactedDetail.after_tokens, 18500);
+  assert.equal("before_chars" in compactedDetail, false);
+  assert.equal("after_chars" in compactedDetail, false);
   const promptMarkers = nodes["conversation-nav"].querySelectorAll(".conversation-nav-marker");
   assert.equal(promptMarkers.length, 4);
   assert.match(promptMarkers[0].textContent, /对话 1.*修复测试/);
@@ -170,5 +208,29 @@ setImmediate(async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(nodes["session-status"].textContent, "IDLE");
   assert.equal(nodes["send-button"].textContent, "↑");
+
+  nodes["memory-view"].hidden = false;
+  transcriptEvents = [
+    {seq: 1, timestamp: "2026-08-27T11:00:00Z", type: "user_prompt", payload: {prompt_index: 8, text: "从磁盘恢复的提问"}},
+    ...Array.from({length: 200}, (_, index) => ({
+      seq: index + 2,
+      timestamp: "2026-08-27T11:05:00Z",
+      type: "progress",
+      payload: {prompt_index: 8, turn: 1, text: `历史执行阶段 ${index + 1}`},
+    })),
+    {seq: 202, timestamp: "2026-08-27T11:10:00Z", type: "final_answer", payload: {prompt_index: 8, text: "从 Transcript 恢复的回答", turns: 2, verification_status: "VERIFIED"}},
+    {seq: 203, timestamp: "2026-08-27T11:10:00Z", type: "turn_completed", payload: {prompt_index: 8, text: "从 Transcript 恢复的回答", turns: 2, verification_status: "VERIFIED"}},
+  ];
+  const transcriptFetchesBefore = fetchCalls.filter((call) => call.url.includes("/api/transcript")).length;
+  await app.activateSession("project-demo", "session-demo");
+  assert.equal(nodes["memory-view"].hidden, true);
+  assert.ok(fetchCalls.some((call) => call.url.includes("/api/session")));
+  const transcriptFetches = fetchCalls.filter((call) => call.url.includes("/api/transcript")).slice(transcriptFetchesBefore);
+  assert.equal(transcriptFetches.length, 2);
+  assert.ok(transcriptFetches[1].url.includes("before_seq="));
+  assert.match(nodes.conversation.textContent, /从磁盘恢复的提问/);
+  assert.match(nodes.conversation.textContent, /从 Transcript 恢复的回答/);
+  assert.match(nodes.conversation.textContent, /用时 10分0秒/);
+  assert.doesNotMatch(nodes.conversation.textContent, /已恢复的会话/);
   console.log("codex-style conversation and review: ok");
 });

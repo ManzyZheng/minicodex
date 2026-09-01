@@ -6,7 +6,7 @@ import threading
 from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,8 @@ class EventBus:
         self._max_event_chars = max_event_chars
         self._next_subscriber_id = 1
         self._subscribers: dict[int, tuple[asyncio.AbstractEventLoop, asyncio.Queue[WebEvent]]] = {}
+        self._next_listener_id = 1
+        self._listeners: dict[int, Callable[[WebEvent], None]] = {}
         self._condition = threading.Condition()
 
     def _bounded_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -78,12 +80,29 @@ class EventBus:
             self._events.append(event)
             self._condition.notify_all()
             subscribers = list(self._subscribers.values())
+            listeners = list(self._listeners.values())
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception:
+                pass
         for loop, queue in subscribers:
             try:
                 loop.call_soon_threadsafe(self._enqueue, queue, event)
             except RuntimeError:
                 pass
         return event
+
+    def add_listener(self, listener: Callable[[WebEvent], None]) -> int:
+        with self._condition:
+            listener_id = self._next_listener_id
+            self._next_listener_id += 1
+            self._listeners[listener_id] = listener
+            return listener_id
+
+    def remove_listener(self, listener_id: int) -> bool:
+        with self._condition:
+            return self._listeners.pop(listener_id, None) is not None
 
     def after(self, last_id: int) -> list[WebEvent]:
         with self._condition:

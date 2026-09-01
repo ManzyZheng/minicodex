@@ -26,6 +26,7 @@
 - 循环保护：最大模型轮数、连续三次相同失败调用检测、`Ctrl+C` 与 Web 停止按钮协作式中断。
 - 分层上下文控制：单结果保护、预算缩减、过时结果裁剪与磁盘 Checkpoint，避免拆散 tool call / result，也避免压缩后反复读取文件。
 - JSONL Session Trace：保存模型回复、工具调用结果、终止原因与验证状态，便于复盘。
+- 分层 Session 持久化：`transcript.jsonl` 永久保存经过脱敏的前端历史，`state.json` 只保存可压缩的 Agent 工作快照，`trace.jsonl` 记录完整调试审计；上下文压缩不会删除用户看到的历史。
 - 验证驱动完成：发生修改后，`test/build/lint` 命令成功才标记 `VERIFIED`；失败为 `FAILED`，未运行是 `NOT_RUN`。
 - Mock Model 单元测试，不依赖真实 API 即可验证 Agent 状态机。
 
@@ -74,6 +75,7 @@ WebWorkspaceManager ── ProjectRegistry / SessionRepository / MemoryStore
 - `prompting.py`：静态、Session、运行时和参考文件四层 Prompt 构造。
 - `references.py`：解析用户 `@` 引用、校验敏感/类型/大小限制并保存 Session 快照。
 - `session.py`：可逐行读取、可回放的 JSONL Trace。
+- `transcript.py`：追加式前端历史、事件白名单、Diff Artifact 与历史投影。
 - `persistence.py`、`projects.py`、`project_sessions.py`：应用数据路径、原子 JSON、Project 注册表和 Session 状态仓库。
 - `memory/`：统一 Global/Project Memory、保守提取、证据验证、去重和 Prompt 索引。
 - `web/manager.py`：管理当前活动 Project/Session，强制全局单运行任务，并在每轮结束后持久化和提取记忆。
@@ -253,9 +255,13 @@ MiniCodex/
     ├── memory/items/             # Project Memory
     └── sessions/<session-id>/
         ├── metadata.json
-        ├── state.json
-        └── trace.jsonl
+        ├── transcript.jsonl       # 用户可见历史；只追加，不参与上下文压缩
+        ├── state.json             # Agent 下一轮恢复快照；原子覆盖，可被压缩
+        ├── trace.jsonl            # 模型、工具、权限与错误的调试审计
+        └── artifacts/diffs/*.patch # 历史文件卡片引用的完整 Diff
 ```
+
+三种 Session 数据有严格边界：浏览器从 Transcript 恢复对话，Agent 只从 State 恢复工作上下文，Trace 不作为普通 UI 数据源。公开事件会同时通过 SSE 实时推送并追加到 Transcript；原始 reasoning、完整 ToolResult、Shell 长输出和文件 before/after 不进入 Transcript。文件卡片只保存路径、增删行数与 `diff_ref`，完整 Diff 在 Artifact 中保存一次。旧 Session 第一次打开时优先根据追加式 Trace 迁移历史，再用旧 State 补充仍可获得的文件变更；迁移不会改写原 Trace。
 
 ### `session.py`：JSONL Trace
 
@@ -371,7 +377,7 @@ Allow? [y/N]
 minicodex-web
 ```
 
-不传 `--workspace` 时先进入项目主页，不创建 Agent，也不会把启动目录隐式授权为 Workspace。点击左侧“＋”添加一个已经存在的本地文件夹；Project 名称默认取文件夹名。项目卡片依次显示“项目名 + 右侧新建 Session”、Workspace 路径、会话列表和项目记忆。添加项目后自动创建初始 Session；以后可在项目标题右侧继续新建 Session，它们保存独立对话、Trace 和验证状态，但串行操作同一个 Workspace。
+不传 `--workspace` 时先进入项目主页，不创建 Agent，也不会把启动目录隐式授权为 Workspace。点击左侧“＋”会打开 Windows 原生文件夹选择窗口；Project 名称默认取文件夹名。左侧使用扁平树展示 Project、Session 和项目记忆，Workspace 绝对路径只在悬浮 Project 名称时提示。Project 右侧的“＋”创建 Session，“⋯”菜单可重命名或删除 Project/Session；重命名只改显示名称，删除只清理 MiniCodex 应用数据中的会话、Trace、状态和项目记忆，**绝不删除或重命名 Workspace 文件夹及其中的代码**。各 Session 保存独立对话、Trace 和验证状态，但串行操作同一个 Workspace。
 
 录制 Demo 或已经知道目标目录时，仍可快速打开：
 
@@ -403,7 +409,15 @@ Web API 很小：
 |---|---|
 | `GET /`、`GET /static/*` | 本机控制台与静态资源 |
 | `GET /api/session?token=...` | 会话、权限/模型选项、累计文件变化与待审批状态 |
+| `GET /api/transcript?token=...&limit=100&before_seq=...` | 分页读取当前 Session 的永久前端历史；每页最多 200 条 |
 | `GET /api/events?token=...` | SSE 事件流与断线补发 |
+| `POST /api/system/folder-picker?token=...` | 打开本机 Windows 文件夹选择窗口；取消返回 `selected=false` |
+| `POST /api/projects?token=...` | 注册选择的 Workspace 并创建或恢复初始 Session |
+| `PATCH /api/projects/{id}?token=...` | 修改 Project 显示名称，不重命名磁盘目录 |
+| `DELETE /api/projects/{id}?token=...` | 删除 MiniCodex 所有该 Project 应用数据，保留 Workspace |
+| `POST /api/projects/{id}/sessions?token=...` | 新建并激活 Session |
+| `PATCH /api/projects/{id}/sessions/{session_id}?token=...` | 修改 Session 标题 |
+| `DELETE /api/projects/{id}/sessions/{session_id}?token=...` | 删除 Session 应用数据并安全切换到可用 Session |
 | `POST /api/prompts?token=...` | 提交 Prompt、ACT/AUTO-ACT 与白名单模型；忙碌时返回 409 |
 | `POST /api/interrupt?token=...` | 请求停止当前 Prompt；空闲时返回 409 |
 | `POST /api/mode?token=...` | 兼容接口；新页面只用它更新 ACT/AUTO-ACT |

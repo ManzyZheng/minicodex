@@ -328,6 +328,38 @@ def test_argv_command_runs_without_shell_and_uses_workspace_temp(tmp_path: Path)
     assert Path(step["stdout"].strip()) == (tmp_path / ".minicodex" / "tmp").resolve()
 
 
+def test_windows_powershell_cmdlet_in_argv_requests_command_form(tmp_path: Path) -> None:
+    if os.name != "nt":
+        return
+    approvals: list[ApprovalPrompt] = []
+    tools = runtime(tmp_path, approve=lambda request: approvals.append(request) or True)
+
+    result = tools.run_shell(
+        "c",
+        [{"argv": ["Remove-Item", "-LiteralPath", "habitlog.json"], "purpose": "other"}],
+    )
+
+    assert not result.ok
+    assert result.error and result.error.code == "SHELL_REQUIRED"
+    assert result.error.retryable is True
+    assert "command" in result.error.message
+    assert approvals == []
+
+
+def test_missing_argv_executable_is_a_retryable_spawn_failure(tmp_path: Path) -> None:
+    missing = "__minicodex_executable_that_does_not_exist__"
+
+    result = runtime(tmp_path, mode=AgentMode.ACT).run_shell(
+        "c",
+        [{"argv": [missing], "purpose": "other"}],
+    )
+
+    assert not result.ok
+    assert result.error and result.error.code == "COMMAND_SPAWN_FAILED"
+    assert result.error.retryable is True
+    assert result.data["commands"][0]["executable"] == missing
+
+
 def test_shell_approval_receives_command_purpose_and_timeout(tmp_path: Path) -> None:
     approvals = []
     tools = runtime(tmp_path, approve=lambda request: approvals.append(request) or False, mode=AgentMode.ACT)

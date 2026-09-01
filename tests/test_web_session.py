@@ -150,10 +150,9 @@ def test_approving_plan_switches_mode_and_continues_same_session(tmp_path) -> No
     assert web.wait_until_idle(1.0)
     assert web.snapshot()["mode"] == "auto-act"
     assert web.agent.prompt_count == 2
-    assert any(
-        message.get("role") == "user" and "approved plan" in str(message.get("content", "")).lower()
-        for message in web.agent.messages
-    )
+    execution_prompt = [message for message in web.agent.messages if message.get("role") == "user"][-1]["content"]
+    assert "已批准" in execution_prompt
+    assert "Change app.py" not in execution_prompt
 
 
 def test_execute_pending_plan_uses_existing_auto_act_mode(tmp_path) -> None:
@@ -171,9 +170,29 @@ def test_execute_pending_plan_uses_existing_auto_act_mode(tmp_path) -> None:
     assert web.agent.execution_mode is AgentMode.AUTO_ACT
     assert web.agent.plan_state is PlanState.INACTIVE
     assert web.snapshot()["pending_plan"] is None
+    execution_prompt = [message for message in web.agent.messages if message.get("role") == "user"][-1]["content"]
+    assert "已批准" in execution_prompt
+    assert "先修改实现，再运行测试" not in execution_prompt
 
 
-def test_plan_feedback_stays_read_only_and_reenters_agent(tmp_path) -> None:
+def test_execute_phrase_does_not_repeat_pending_plan_in_new_user_message(tmp_path) -> None:
+    web = make_web_session(
+        tmp_path,
+        ReplyModel([ModelReply(content="implemented")]),
+        mode=AgentMode.ACT,
+    )
+    web.agent.enter_plan_mode("enter")
+    web.mark_plan_ready("一份不应重复发送的完整方案")
+
+    web.submit_prompt("执行方案")
+
+    assert web.wait_until_idle(1.0)
+    execution_prompt = [message for message in web.agent.messages if message.get("role") == "user"][-1]["content"]
+    assert "已批准" in execution_prompt
+    assert "一份不应重复发送的完整方案" not in execution_prompt
+
+
+def test_plan_feedback_stays_read_only_and_returns_for_approval(tmp_path) -> None:
     web = make_web_session(
         tmp_path,
         ReplyModel([ModelReply(content="revised plan")]),
@@ -186,8 +205,9 @@ def test_plan_feedback_stays_read_only_and_reenters_agent(tmp_path) -> None:
 
     assert web.wait_until_idle(1.0)
     assert web.agent.execution_mode is AgentMode.AUTO_ACT
-    assert web.agent.plan_state is PlanState.PLANNING
+    assert web.agent.plan_state is PlanState.WAITING_APPROVAL
     assert web.agent.tools.mode is AgentMode.PLAN
+    assert web.snapshot()["pending_plan"]["text"] == "revised plan"
     assert any(message.get("content") == "保持旧 API 兼容" for message in web.agent.messages)
 
 
@@ -201,6 +221,23 @@ def test_cancel_plan_returns_idle_without_starting_implementation(tmp_path) -> N
     assert web.snapshot()["status"] == "IDLE"
     assert web.agent.plan_state is PlanState.INACTIVE
     assert web.agent.prompt_count == 0
+
+
+def test_rejecting_pending_plan_in_prompt_exits_plan_without_calling_model(tmp_path) -> None:
+    web = make_web_session(tmp_path, ReplyModel([]), mode=AgentMode.AUTO_ACT)
+    web.agent.enter_plan_mode("enter")
+    plan = web.mark_plan_ready("原计划")
+
+    web.submit_prompt("拒绝执行")
+
+    assert web.snapshot()["status"] == "IDLE"
+    assert web.snapshot()["pending_plan"] is None
+    assert web.agent.plan_state is PlanState.INACTIVE
+    assert web.agent.execution_mode is AgentMode.AUTO_ACT
+    assert web.agent.tools.mode is AgentMode.AUTO_ACT
+    assert web.agent.prompt_count == 0
+    resolved = [event for event in web.events.after(0) if event.type == "plan_resolved"][-1]
+    assert resolved.payload == {"id": plan.id, "action": "cancel"}
 
 
 def test_session_snapshot_restores_cumulative_file_changes(tmp_path) -> None:

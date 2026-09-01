@@ -14,13 +14,13 @@ const statusNode = $("#session-status");
 const verificationNode = $("#verification-status");
 const reviewPanel = $("#review-panel");
 const approvalDialog = $("#approval-dialog");
+const resourceDialog = $("#resource-dialog");
 const sessionReferences = $("#session-references");
 const referenceSummary = $("#reference-summary");
 const referenceList = $("#reference-list");
 const projectList = $("#project-list");
 const memoryView = $("#memory-view");
 const memoryList = $("#memory-list");
-const memoryToast = $("#memory-toast");
 const token = new URLSearchParams(window.location.search).get("token") || "";
 const withToken = (path) => `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
 const BUSY_STATUSES = new Set(["CONNECTING", "RUNNING", "STOPPING", "WAITING_APPROVAL", "RECONNECTING", "CLOSING"]);
@@ -44,6 +44,7 @@ const state = {
   activeProjectId: null,
   activeSessionId: null,
   memoryScope: null,
+  resourceAction: null,
 };
 
 function element(tag, className, text) {
@@ -120,6 +121,40 @@ function hydrateHistory(history, verification) {
       turn = null;
     }
   });
+}
+
+function hydrateTranscript(events) {
+  if (state.turns.size || !Array.isArray(events)) return false;
+  const ordered = [...events].sort((left, right) => Number(left.seq) - Number(right.seq));
+  const firstPromptIndex = ordered.findIndex((event) => event.type === "user_prompt");
+  if (firstPromptIndex < 0) return false;
+  ordered.slice(firstPromptIndex).forEach((event) => {
+    const payload = {...(event.payload || {}), event_timestamp: event.timestamp};
+    const handler = handlers[event.type];
+    if (handler) handler(payload);
+  });
+  return true;
+}
+
+async function loadTranscript() {
+  if (state.turns.size) return true;
+  const eventsBySeq = new Map();
+  const seenCursors = new Set();
+  let beforeSeq = null;
+  while (true) {
+    const cursor = beforeSeq === null ? "" : `&before_seq=${encodeURIComponent(beforeSeq)}`;
+    const response = await fetch(withToken(`/api/transcript?limit=200${cursor}`));
+    if (response.status === 404) return false;
+    if (!response.ok) throw new Error(`session transcript failed: ${response.status}`);
+    const data = await response.json();
+    for (const event of data.events || []) eventsBySeq.set(event.seq, event);
+    if (!data.has_more || data.next_before_seq === null || data.next_before_seq === undefined) break;
+    const nextCursor = Number(data.next_before_seq);
+    if (!Number.isFinite(nextCursor) || seenCursors.has(nextCursor)) throw new Error("session transcript pagination stalled");
+    seenCursors.add(nextCursor);
+    beforeSeq = nextCursor;
+  }
+  return hydrateTranscript([...eventsBySeq.values()]);
 }
 
 function renderMarkdown(target, text) {
@@ -204,9 +239,10 @@ function createTurn(data) {
   const finalBlock = element("section", "final-block");
   const finalLabel = element("div", "final-label", "MiniCodex");
   const finalAnswer = element("div", "final-answer");
+  const memoryNotices = element("div", "memory-notices");
   const changes = element("section", "changes-slot");
   const plan = element("section", "plan-slot");
-  finalBlock.append(finalLabel, finalAnswer, changes, plan);
+  finalBlock.append(finalLabel, finalAnswer, memoryNotices, changes, plan);
   body.append(user, process, finalBlock);
   root.append(body);
   conversation.append(root);
@@ -218,6 +254,8 @@ function createTurn(data) {
     processItems,
     finalLabel,
     finalAnswer,
+    memoryNotices,
+    memoryNoticeIds: new Set(),
     changes,
     plan,
     promptIndex: Number(data.prompt_index || state.turns.size + 1),
@@ -474,7 +512,7 @@ function renderPlan(data) {
   const execute = element("button", "", "执行方案");
   execute.type = "button";
   execute.addEventListener("click", () => resolvePlan("execute").catch(reportError));
-  const cancel = element("button", "secondary", "取消方案");
+  const cancel = element("button", "secondary", "拒绝执行");
   cancel.type = "button";
   cancel.addEventListener("click", () => resolvePlan("cancel").catch(reportError));
   actions.append(execute, cancel);
@@ -545,12 +583,25 @@ function contextRemoved(data) {
   renderReferences();
 }
 
-function showMemoryToast(data) {
-  if (!memoryToast) return;
-  const scope = data.scope === "global" ? "全局" : "项目";
-  memoryToast.textContent = `已自动记住 · ${scope}：${data.title || data.content || "新记忆"}`;
-  memoryToast.hidden = false;
-  setTimeout(() => { memoryToast.hidden = true; }, 5000);
+function renderMemoryNotice(data) {
+  const promptIndex = Number(data.source_prompt_index || 0);
+  const turn = state.turns.get(promptIndex) || state.current;
+  if (!turn || !data.id || turn.memoryNoticeIds.has(data.id)) return;
+  const scope = data.scope === "global" ? "global" : "project";
+  const scopeLabel = scope === "global" ? "全局记忆" : "项目记忆";
+  const notice = element("article", `memory-notice ${scope}`);
+  const header = element("div", "memory-notice-title", `◇ 已保存到${scopeLabel}`);
+  const body = element("div", "memory-notice-content");
+  body.append(element("strong", "", data.title || "长期规则"));
+  if (data.content) body.append(element("span", "", data.content));
+  notice.append(header, body);
+  turn.memoryNotices.append(notice);
+  turn.memoryNoticeIds.add(data.id);
+}
+
+function hydrateMemoryNotices(items) {
+  if (!Array.isArray(items)) return;
+  items.forEach(renderMemoryNotice);
 }
 
 const handlers = {
@@ -576,10 +627,27 @@ const handlers = {
   context_loaded: contextLoaded,
   context_removed: contextRemoved,
   session_reset() { resetConversation(); },
-  memory_created(data) { showMemoryToast(data); if (state.memoryScope === data.scope) loadMemories().catch(reportError); },
+  memory_created(data) { renderMemoryNotice(data); if (state.memoryScope === data.scope) loadMemories().catch(reportError); },
   memory_forgotten() { if (state.memoryScope) loadMemories().catch(reportError); },
   context_error(data) { addActivity({ok: false, group: "context-error", label: `参考文件失败 · ${data.code || "UNKNOWN"}`, detail: data}); },
-  context_compacted(data) { addActivity({ok: true, group: "context-compact", label: `上下文已压缩 · ${formatCompactChars(data.before_chars)} → ${formatCompactChars(data.after_chars)} 字符`, detail: data}); },
+  context_compacted(data) {
+    const beforeTokens = Number(data.before_tokens);
+    const afterTokens = Number(data.after_tokens);
+    const hasTokens = Number.isFinite(beforeTokens) && Number.isFinite(afterTokens);
+    const detail = {};
+    for (const key of ["before_messages", "after_messages", "before_tokens", "after_tokens", "stages", "compaction_count", "turn", "event_timestamp"]) {
+      if (data[key] !== undefined) detail[key] = data[key];
+    }
+    if (hasTokens) detail.saved_tokens = Math.max(0, beforeTokens - afterTokens);
+    addActivity({
+      ok: true,
+      group: "context-compact",
+      label: hasTokens
+        ? `上下文已压缩 · ${formatCompactTokens(beforeTokens)} → ${formatCompactTokens(afterTokens)} tokens`
+        : "上下文已压缩",
+      detail,
+    });
+  },
   interrupt_requested() { setStatus("STOPPING"); },
   error(data) { addActivity({ok: false, group: "error", label: `错误 · ${data.code || "UNKNOWN"}`, text: `错误 · ${data.code || "UNKNOWN"}`, detail: data}); },
 };
@@ -621,36 +689,78 @@ function renderProjects(data) {
   if (!projectList) return;
   projectList.replaceChildren();
   state.projects.forEach((project) => {
-    const group = element("section", "project-group");
-    if (project.id === state.activeProjectId) group.classList.add("active");
-    const header = element("div", "project-header");
-    const title = element("div", "project-title", project.name);
-    const add = element("button", "project-session-add", "＋ 新建 Session");
+    const tree = element("section", "project-tree");
+    const row = element("div", "project-row");
+    if (project.id === state.activeProjectId) row.classList.add("active");
+    const disclosure = element("button", "project-disclosure", "⌄");
+    disclosure.type = "button";
+    disclosure.setAttribute("aria-label", `折叠 ${project.name}`);
+    const title = element("button", "project-title", project.name);
+    title.type = "button";
+    title.title = project.workspace || project.name;
+    const add = element("button", "project-session-add", "＋");
     add.type = "button";
+    add.title = "新建 Session";
+    add.setAttribute("aria-label", `在 ${project.name} 中新建 Session`);
     add.disabled = BUSY_STATUSES.has(state.status);
-    add.addEventListener("click", () => createSession(project.id).catch(reportError));
-    header.append(title, add);
-    const workspace = element("div", "project-workspace", project.workspace || "");
-    workspace.title = project.workspace || "";
-    const sectionLabel = element("div", "project-section-label", "会话");
-    const sessions = element("div", "session-list");
+    add.addEventListener("click", (event) => { event.stopPropagation(); createSession(project.id).catch(reportError); });
+    const projectMenu = sidebarMenu([
+      ["重命名", () => openResourceDialog("rename-project", project.id, null, project.name)],
+      ["删除", () => openResourceDialog("delete-project", project.id, null, project.name), true],
+    ], `管理项目 ${project.name}`);
+    row.append(disclosure, title, add, projectMenu);
+    const children = element("div", "project-children");
+    disclosure.addEventListener("click", () => {
+      children.hidden = !children.hidden;
+      disclosure.textContent = children.hidden ? "›" : "⌄";
+      disclosure.setAttribute("aria-label", `${children.hidden ? "展开" : "折叠"} ${project.name}`);
+    });
+    title.addEventListener("click", () => disclosure.click());
     (project.sessions || []).forEach((session) => {
-      const button = element("button", `session-link${session.id === state.activeSessionId ? " active" : ""}`, session.title || "新会话");
+      const sessionRow = element("div", "session-row");
+      if (session.id === state.activeSessionId) sessionRow.classList.add("active");
+      const button = element("button", "session-link", session.title || "新会话");
       button.type = "button";
       button.title = session.title || "新会话";
-      button.append(element("small", "", `${String(session.status || "idle").toUpperCase()} · ${session.verification || "NOT_RUN"}`));
       button.addEventListener("click", () => activateSession(project.id, session.id).catch(reportError));
-      sessions.append(button);
+      const sessionMenu = sidebarMenu([
+        ["重命名", () => openResourceDialog("rename-session", project.id, session.id, session.title || "新会话")],
+        ["删除", () => openResourceDialog("delete-session", project.id, session.id, session.title || "新会话"), true],
+      ], `管理会话 ${session.title || "新会话"}`);
+      sessionRow.append(button, sessionMenu);
+      children.append(sessionRow);
     });
     const memory = element("button", "project-memory", "◇ 项目记忆");
     memory.type = "button";
     memory.addEventListener("click", (event) => { event.stopPropagation(); openMemory("project", project.id).catch(reportError); });
-    group.append(header, workspace, sectionLabel, sessions, memory);
-    projectList.append(group);
+    children.append(memory);
+    tree.append(row, children);
+    projectList.append(tree);
   });
 }
 
+function sidebarMenu(items, label) {
+  const details = element("details", "sidebar-actions");
+  const summary = element("summary", "sidebar-actions-trigger", "⋯");
+  summary.setAttribute("aria-label", label);
+  const menu = element("div", "sidebar-menu");
+  items.forEach(([text, action, destructive]) => {
+    const button = element("button", destructive ? "destructive" : "", text);
+    button.type = "button";
+    button.disabled = BUSY_STATUSES.has(state.status);
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      details.open = false;
+      action();
+    });
+    menu.append(button);
+  });
+  details.append(summary, menu);
+  return details;
+}
+
 async function createSession(projectId) {
+  closeMemory();
   const data = await postJson(`/api/projects/${encodeURIComponent(projectId)}/sessions`, {title: "新会话"});
   resetConversation();
   state.activeProjectId = projectId;
@@ -659,8 +769,11 @@ async function createSession(projectId) {
 }
 
 async function activateSession(projectId, sessionId) {
-  if (sessionId === state.activeSessionId) return;
-  await postJson(`/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/activate`, {});
+  closeMemory();
+  const alreadyActive = projectId === state.activeProjectId && sessionId === state.activeSessionId;
+  if (!alreadyActive) {
+    await postJson(`/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/activate`, {});
+  }
   resetConversation();
   state.activeProjectId = projectId;
   state.activeSessionId = sessionId;
@@ -668,9 +781,49 @@ async function activateSession(projectId, sessionId) {
 }
 
 async function registerProject() {
-  const workspace = window.prompt("添加项目：输入本地 Workspace 文件夹绝对路径");
-  if (!workspace || !workspace.trim()) return;
-  await postJson("/api/projects", {workspace: workspace.trim()});
+  closeMemory();
+  const picked = await postJson("/api/system/folder-picker", {});
+  if (!picked.selected || !picked.workspace) return;
+  await postJson("/api/projects", {workspace: picked.workspace});
+  resetConversation();
+  await loadSnapshot();
+}
+
+function openResourceDialog(action, projectId, sessionId, currentName) {
+  state.resourceAction = {action, projectId, sessionId};
+  const deleting = action.startsWith("delete-");
+  const project = action.endsWith("project");
+  $("#resource-title").textContent = `${deleting ? "删除" : "重命名"}${project ? "项目" : "会话"}`;
+  $("#resource-description").textContent = deleting
+    ? (project
+      ? "只会删除 MiniCodex 保存的会话、Trace 和项目记忆；不会删除工作区文件夹或其中的代码。"
+      : "只会删除该会话的对话、Trace 和状态；不会修改项目代码。")
+    : "显示名称会更新，磁盘上的文件夹名称不会改变。";
+  $("#resource-name-field").hidden = deleting;
+  $("#resource-name").value = deleting ? "" : currentName;
+  $("#resource-confirm").textContent = deleting ? "删除" : "保存";
+  $("#resource-confirm").classList.toggle("destructive", deleting);
+  resourceDialog.showModal();
+  if (!deleting) $("#resource-name").select();
+}
+
+async function submitResourceAction(event) {
+  event.preventDefault();
+  const pending = state.resourceAction;
+  if (!pending) return;
+  const name = $("#resource-name").value.trim();
+  if (pending.action.startsWith("rename-") && !name) return;
+  if (pending.action === "rename-project") {
+    await requestJson(`/api/projects/${encodeURIComponent(pending.projectId)}`, {method: "PATCH", body: {name}});
+  } else if (pending.action === "delete-project") {
+    await requestJson(`/api/projects/${encodeURIComponent(pending.projectId)}`, {method: "DELETE"});
+  } else if (pending.action === "rename-session") {
+    await requestJson(`/api/projects/${encodeURIComponent(pending.projectId)}/sessions/${encodeURIComponent(pending.sessionId)}`, {method: "PATCH", body: {title: name}});
+  } else if (pending.action === "delete-session") {
+    await requestJson(`/api/projects/${encodeURIComponent(pending.projectId)}/sessions/${encodeURIComponent(pending.sessionId)}`, {method: "DELETE"});
+  }
+  resourceDialog.close();
+  state.resourceAction = null;
   resetConversation();
   await loadSnapshot();
 }
@@ -741,6 +894,7 @@ async function loadSnapshot() {
   if (!response.ok) throw new Error(`session snapshot failed: ${response.status}`);
   const data = await response.json();
   state.latestEventId = Math.max(state.latestEventId, Number(data.event_id || 0));
+  state.status = data.status || state.status;
   renderProjects(data);
   if (!data.active_project_id || !data.active_session_id) {
     setWorkspace("");
@@ -754,7 +908,9 @@ async function loadSnapshot() {
   setPermission(data.execution_mode || (data.mode === "auto-act" ? "auto-act" : "act"));
   setModels(data.allowed_models, data.model);
   setVerification(data.verification_status);
-  hydrateHistory(data.history, data.verification_status);
+  const restoredFromTranscript = await loadTranscript();
+  if (!restoredFromTranscript) hydrateHistory(data.history, data.verification_status);
+  hydrateMemoryNotices(data.memory_notices);
   (data.file_changes || []).forEach(rememberChange);
   state.references.clear();
   (data.references || []).map(referenceMetadata).forEach((reference) => state.references.set(reference.id, reference));
@@ -780,11 +936,11 @@ function connectEvents(after) {
   source.onopen = () => loadSnapshot().catch(reportError);
 }
 
-async function postJson(path, body) {
+async function requestJson(path, {method = "GET", body} = {}) {
   const response = await fetch(withToken(path), {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body: JSON.stringify(body),
+    method,
+    headers: body === undefined ? undefined : JSON_HEADERS,
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
     const error = new Error(await response.text());
@@ -792,6 +948,10 @@ async function postJson(path, body) {
     throw error;
   }
   return response.json();
+}
+
+async function postJson(path, body) {
+  return requestJson(path, {method: "POST", body});
 }
 
 async function removeReference(referenceId) {
@@ -816,7 +976,7 @@ async function submitPrompt() {
   promptInput.value = "";
 }
 
-function formatCompactChars(value) {
+function formatCompactTokens(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount)) return "?";
   if (amount >= 1_000_000) return `${(amount / 1_000_000).toFixed(1)}M`;
@@ -889,6 +1049,9 @@ $("#new-project")?.addEventListener("click", () => registerProject().catch(repor
 $("#global-memory")?.addEventListener("click", () => openMemory("global").catch(reportError));
 $("#close-memory")?.addEventListener("click", closeMemory);
 $("#memory-form")?.addEventListener("submit", (event) => submitMemory(event).catch(reportError));
+$("#resource-form")?.addEventListener("submit", (event) => submitResourceAction(event).catch(reportError));
+$("#resource-cancel")?.addEventListener("click", () => { state.resourceAction = null; resourceDialog.close(); });
+resourceDialog?.addEventListener("cancel", () => { state.resourceAction = null; });
 
-window.MiniCodexApp = {handleEvent, setStatus, openReview, closeReview, isNearBottom, syncScrollButton};
-loadSnapshot().then(() => connectEvents(0)).catch(reportError);
+window.MiniCodexApp = {handleEvent, setStatus, openReview, closeReview, isNearBottom, syncScrollButton, activateSession, hydrateTranscript};
+loadSnapshot().then((snapshot) => connectEvents(Number(snapshot.event_id || 0))).catch(reportError);

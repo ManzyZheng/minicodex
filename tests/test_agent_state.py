@@ -24,6 +24,7 @@ def test_agent_exports_and_restores_conversation_without_transient_read_state(tm
     restored.restore_state(state)
 
     assert restored.prompt_count == 1
+    assert state["schema_version"] == 2
     assert restored.execution_mode is AgentMode.AUTO_ACT
     assert any(message.get("content") == "检查项目" for message in restored.messages)
     assert not restored_runtime.read_paths

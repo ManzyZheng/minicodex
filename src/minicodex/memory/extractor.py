@@ -21,7 +21,11 @@ Keep only explicit durable preferences, reusable corrections, project rules, dec
 Never keep one-off instructions, current implementation details, workspace-derivable facts, test results, code, logs, secrets, or assistant inferences.
 Global requires explicit cross-project language or a stable personal preference independent of this project.
 Every evidence and scope_evidence must be a continuous exact substring of recent user text.
-Return JSON only with a candidates array. Usually return {"candidates":[]}.
+Return JSON only using this exact schema:
+{"candidates":[{"scope":"global|project","kind":"preference|decision|reference","title":"short title","content":"durable rule","evidence":"exact user substring","scope_evidence":"exact substring proving scope","durability":"explicit","confidence":0.0}]}
+Use scope "global" only when scope_evidence explicitly applies across projects or states a stable personal preference.
+Use scope "project" for an explicit durable rule tied to the named project.
+Usually return {"candidates":[]}.
 """
 
 
@@ -42,18 +46,24 @@ class MemoryExtractor:
         if not isinstance(raw_candidates, list):
             raise MemoryExtractionError("memory candidates must be a list")
         candidates: list[MemoryCandidate] = []
+        malformed = False
         for raw in raw_candidates[:2]:
             if not isinstance(raw, dict):
-                raise MemoryExtractionError("memory candidate must be an object")
+                malformed = True
+                continue
             try:
                 item = MemoryCandidate(
                     str(raw["scope"]), str(raw["kind"]), str(raw["title"]), str(raw["content"]),
                     str(raw["evidence"]), str(raw["scope_evidence"]), str(raw["durability"]),
                     float(raw.get("confidence", 0.0)),
                 )
-            except (KeyError, TypeError, ValueError) as exc:
-                raise MemoryExtractionError("memory candidate has invalid fields") from exc
+            except (KeyError, TypeError, ValueError):
+                malformed = True
+                continue
             if item.scope not in MEMORY_SCOPES or item.kind not in MEMORY_KINDS:
-                raise MemoryExtractionError("memory candidate has invalid scope or kind")
+                malformed = True
+                continue
             candidates.append(item)
+        if raw_candidates and malformed and not candidates:
+            raise MemoryExtractionError("memory extractor returned no valid candidates")
         return candidates

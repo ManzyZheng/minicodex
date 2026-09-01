@@ -68,8 +68,26 @@ def test_project_session_and_memory_controls_are_present() -> None:
     assert "/api/memories" in script
     assert "session_reset" in script
     assert "memory_created" in script
-    assert '"project-session-add"' in script
-    assert '"project-workspace"' in script
-    assert '"project-section-label"' in script
-    assert '"＋ 新建 Session"' in script
-    assert script.index('"project-session-add"') < script.index('"project-workspace"')
+    assert "/api/system/folder-picker" in script
+    assert "window.prompt" not in script
+    assert 'id="resource-dialog"' in html
+    assert 'id="resource-name"' in html
+    assert '"project-tree"' in script
+    assert '"project-row"' in script
+    assert '"session-row"' in script
+    assert '"sidebar-menu"' in script
+    assert '"project-group"' not in script
+    assert '"project-workspace"' not in script
+    assert 'method: "PATCH"' in script
+    assert 'method: "DELETE"' in script
+
+
+def test_sidebar_css_uses_flat_tree_rows_instead_of_project_cards() -> None:
+    static_dir = Path(__file__).parents[1] / "src" / "minicodex" / "web" / "static"
+    stylesheet = (static_dir / "codex-app.css").read_text(encoding="utf-8")
+
+    assert ".project-tree" in stylesheet
+    assert ".project-row" in stylesheet
+    assert ".session-row" in stylesheet
+    assert ".sidebar-actions" in stylesheet
+    assert ".project-group.active" not in stylesheet

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -86,10 +87,38 @@ class ProjectRegistry:
         atomic_write_json(self.paths.project_root(updated.id) / "project.json", asdict(updated))
         return updated
 
-    def remove(self, project_id: str) -> bool:
+    def rename(self, project_id: str, name: str) -> ProjectRecord:
+        display_name = name.strip()
+        if not display_name:
+            raise ValueError("project name must not be blank")
         projects = self._load()
-        remaining = [item for item in projects if item.id != project_id]
-        if len(remaining) == len(projects):
+        current = next((item for item in projects if item.id == project_id), None)
+        if current is None:
+            raise KeyError(project_id)
+        updated = ProjectRecord(
+            current.id,
+            display_name,
+            current.workspace,
+            current.created_at,
+            _now(),
+            current.last_session_id,
+        )
+        projects[projects.index(current)] = updated
+        self._save(projects)
+        atomic_write_json(self.paths.project_root(updated.id) / "project.json", asdict(updated))
+        return updated
+
+    def remove(self, project_id: str, *, purge_data: bool = False) -> bool:
+        projects = self._load()
+        current = next((item for item in projects if item.id == project_id), None)
+        if current is None:
             return False
-        self._save(remaining)
+        self._save([item for item in projects if item.id != project_id])
+        if purge_data:
+            owned_root = self.paths.project_root(current.id)
+            projects_root = (self.paths.root / "projects").resolve()
+            if owned_root.resolve().parent != projects_root:
+                raise RuntimeError("refusing to remove data outside the MiniCodex projects directory")
+            if owned_root.exists():
+                shutil.rmtree(owned_root)
         return True

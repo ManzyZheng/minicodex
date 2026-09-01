@@ -497,21 +497,25 @@ def test_plan_tools_allow_read_and_exit_control_only(tmp_path: Path) -> None:
     assert exit_parameters["required"] == ["plan"]
 
 
-def test_model_can_enter_plan_without_calling_workspace_runtime(tmp_path: Path) -> None:
+def test_plan_final_text_without_exit_tool_waits_for_user_approval(tmp_path: Path) -> None:
     model = MockModel([
         ModelReply(tool_calls=[ToolCall("plan", "enter_plan_mode", {})]),
         ModelReply(content="我先只读检查相关代码。"),
     ])
+    runtime = ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT)
     session = AgentSession(
         model,
-        ToolRuntime(tmp_path, approver=lambda _request: True, mode=AgentMode.AUTO_ACT),
+        runtime,
     )
 
     outcome = session.run_turn("先分析这个改动")
 
     assert outcome.stop_reason is StopReason.COMPLETED
+    assert outcome.final_text == "我先只读检查相关代码。"
     assert session.execution_mode is AgentMode.AUTO_ACT
-    assert session.plan_state is PlanState.PLANNING
+    assert session.plan_state is PlanState.WAITING_APPROVAL
+    assert session.pending_plan_text == "我先只读检查相关代码。"
+    assert runtime.mode is AgentMode.PLAN
     tool_message = next(message for message in session.messages if message.get("tool_call_id") == "plan")
     assert "UNKNOWN_TOOL" not in tool_message["content"]
 

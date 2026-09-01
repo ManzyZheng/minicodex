@@ -12,6 +12,11 @@ from .approval import ApprovalGate
 from .events import EventBus
 
 
+_EXECUTE_PLAN_PROMPTS = frozenset({"执行", "执行方案", "开始执行", "execute"})
+_CANCEL_PLAN_PROMPTS = frozenset({"取消", "取消方案", "拒绝", "拒绝执行", "不执行", "不要执行", "cancel"})
+_APPROVED_PLAN_PROMPT = "执行刚才已批准的方案，保留其全部约束，并验证完成的修改。"
+
+
 class SessionBusyError(RuntimeError):
     pass
 
@@ -158,7 +163,7 @@ class WebSession:
     def approve_plan(self, mode: AgentMode) -> None:
         if mode is AgentMode.PLAN:
             raise ValueError("an approved plan must continue in act or auto-act mode")
-        prompt = "Implement the approved plan above. Preserve its constraints and verify the completed changes."
+        prompt = _APPROVED_PLAN_PROMPT
         with self._condition:
             if self._status != "IDLE":
                 raise SessionBusyError("the Agent must be idle before approving a plan")
@@ -166,10 +171,8 @@ class WebSession:
                 raise ValueError("the session is not in Plan Mode")
             self.agent.execution_mode = mode
             if self._pending_plan is not None:
-                plan = self._pending_plan
                 self._pending_plan = None
                 self.agent.resume_plan(execute=True)
-                prompt = f"{prompt}\n\nApproved plan:\n{plan.text}"
             else:
                 self.agent.set_mode(mode)
             self._start_prompt_locked(prompt)
@@ -216,10 +219,7 @@ class WebSession:
                 return
             self.agent.resume_plan(execute=True)
             self.events.publish("plan_resolved", {"id": plan.id, "action": action})
-            self._start_prompt_locked(
-                "Implement the approved plan below. Preserve its constraints and verify the completed changes.\n\n"
-                f"{plan.text}"
-            )
+            self._start_prompt_locked(_APPROVED_PLAN_PROMPT)
 
     def submit_prompt(
         self,
@@ -250,13 +250,15 @@ class WebSession:
             if self._pending_plan is not None:
                 plan = self._pending_plan
                 self._pending_plan = None
-                if prompt.casefold() in {"执行", "执行方案", "开始执行", "execute"}:
+                plan_response = prompt.casefold()
+                if plan_response in _EXECUTE_PLAN_PROMPTS:
                     self.agent.resume_plan(execute=True)
                     self.events.publish("plan_resolved", {"id": plan.id, "action": "execute"})
-                    prompt = (
-                        "Implement the approved plan below. Preserve its constraints and verify the completed changes.\n\n"
-                        f"{plan.text}"
-                    )
+                    prompt = _APPROVED_PLAN_PROMPT
+                elif plan_response in _CANCEL_PLAN_PROMPTS:
+                    self.agent.resume_plan(execute=True)
+                    self.events.publish("plan_resolved", {"id": plan.id, "action": "cancel"})
+                    return
                 else:
                     self.agent.resume_plan(execute=False, feedback=prompt)
                     self.events.publish("plan_resolved", {"id": plan.id, "action": "revise"})

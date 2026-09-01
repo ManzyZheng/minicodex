@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniCodex · 本地代码 Agent</title>
-  <link rel="stylesheet" href="/static/codex-app.css?v=codex-ui-12">
+  <link rel="stylesheet" href="/static/codex-app.css?v=codex-ui-13">
 </head>
 <body>
   <header class="topbar">
@@ -51,7 +51,6 @@
         </form>
         <div id="memory-list" class="memory-list"></div>
       </section>
-      <div id="memory-toast" class="memory-toast" hidden></div>
     </section>
     <aside id="review-panel" class="review-panel" aria-label="代码变更审查" hidden>
       <header class="review-header"><div><span>代码变更</span><strong id="review-title">选择文件</strong></div><button id="close-review" class="icon-button" type="button" aria-label="关闭代码审查">×</button></header>
@@ -62,7 +61,16 @@
   <dialog id="approval-dialog" class="approval-dialog">
     <form method="dialog"><span class="dialog-kicker">需要确认</span><h2 id="approval-title">允许 Agent 执行此操作？</h2><p id="approval-purpose"></p><pre><code id="approval-command"></code></pre><p id="approval-timeout" class="muted"></p><div class="approval-actions"><button id="reject-command" type="button" class="secondary">拒绝</button><button id="allow-command" type="button">允许一次</button></div></form>
   </dialog>
+  <dialog id="resource-dialog" class="resource-dialog">
+    <form id="resource-form">
+      <span class="dialog-kicker">项目管理</span>
+      <h2 id="resource-title">重命名</h2>
+      <p id="resource-description" class="muted"></p>
+      <label id="resource-name-field" class="resource-name-field">名称<input id="resource-name" maxlength="80" autocomplete="off"></label>
+      <div class="resource-actions"><button id="resource-cancel" type="button" class="secondary">取消</button><button id="resource-confirm" type="submit">保存</button></div>
+    </form>
+  </dialog>
   <script src="/static/markdown.js?v=markdown-2" defer></script>
-  <script src="/static/codex-app.js?v=codex-ui-12" defer></script>
+  <script src="/static/codex-app.js?v=codex-ui-13" defer></script>
 </body>
 </html>

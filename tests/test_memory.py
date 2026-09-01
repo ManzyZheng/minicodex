@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from minicodex.memory import MemoryExtractor, MemoryService, MemoryStore
+import pytest
+
+from minicodex.memory import MemoryCandidate, MemoryExtractionError, MemoryExtractor, MemoryService, MemoryStore
 from minicodex.models import ModelReply
 from minicodex.persistence import ApplicationPaths
 
@@ -13,9 +15,11 @@ class ReplyModel:
         self.content = content
         self.calls = 0
         self.received_tools = None
+        self.received_messages = None
 
     def complete(self, messages, tools) -> ModelReply:
         self.calls += 1
+        self.received_messages = messages
         self.received_tools = tools
         return ModelReply(content=self.content)
 
@@ -63,6 +67,41 @@ def test_extractor_accepts_empty_candidates_and_uses_no_tools(tmp_path: Path) ->
     assert extractor.extract(project_name="Demo", recent_user_messages=["修复 Bug"], existing_index=[]) == []
     assert model.calls == 1
     assert model.received_tools == []
+
+
+def test_extractor_prompt_declares_the_complete_candidate_schema() -> None:
+    model = ReplyModel('{"candidates": []}')
+
+    MemoryExtractor(model).extract(project_name="TaskJar", recent_user_messages=["请长期记住"], existing_index=[])
+
+    system_prompt = model.received_messages[0]["content"]
+    for field in ("scope", "kind", "title", "content", "evidence", "scope_evidence", "durability", "confidence"):
+        assert f'"{field}"' in system_prompt
+
+
+def test_extractor_skips_one_malformed_candidate_without_losing_valid_candidate() -> None:
+    payload = {
+        "candidates": [
+            {"scope": "project", "title": "缺少字段"},
+            candidate(),
+        ]
+    }
+    extractor = MemoryExtractor(ReplyModel(json.dumps(payload, ensure_ascii=False)))
+
+    result = extractor.extract(
+        project_name="Demo",
+        recent_user_messages=["这个项目以后不要自动修改版本号"],
+        existing_index=[],
+    )
+
+    assert result == [MemoryCandidate(**candidate())]
+
+
+def test_extractor_rejects_a_nonempty_batch_when_every_candidate_is_malformed() -> None:
+    extractor = MemoryExtractor(ReplyModel('{"candidates": [{"scope": "project"}]}'))
+
+    with pytest.raises(MemoryExtractionError, match="no valid candidates"):
+        extractor.extract(project_name="Demo", recent_user_messages=["请长期记住"], existing_index=[])
 
 
 def test_service_auto_saves_valid_project_and_global_candidates(tmp_path: Path) -> None:

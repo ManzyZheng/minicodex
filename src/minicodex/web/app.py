@@ -6,13 +6,14 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from ..folder_picker import WindowsFolderPicker
 from ..permissions import AgentMode
 from .events import WebEvent
 from .session import PlanResolutionError, SessionBusyError, WebSession
@@ -46,6 +47,14 @@ class SessionRequest(BaseModel):
     title: str = "新会话"
 
 
+class ProjectRenameRequest(BaseModel):
+    name: str
+
+
+class SessionRenameRequest(BaseModel):
+    title: str
+
+
 class MemoryRequest(BaseModel):
     scope: Literal["global", "project"]
     kind: Literal["preference", "decision", "reference"]
@@ -60,7 +69,14 @@ def format_sse_event(event: WebEvent) -> str:
     return f"id: {event.id}\nevent: {event.type}\ndata: {data}\n\n"
 
 
-def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
+def create_app(
+    web_session: WebSession,
+    *,
+    access_token: str,
+    folder_picker: Callable[[], str | None] | None = None,
+) -> FastAPI:
+    pick_folder = folder_picker or WindowsFolderPicker()
+
     def require_active_session() -> None:
         if getattr(web_session, "has_active_session", True) is False:
             raise HTTPException(status_code=409, detail="select or add a project before running the Agent")
@@ -101,6 +117,19 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
     def session_snapshot() -> dict:
         return web_session.snapshot()
 
+    @app.get("/api/transcript")
+    def session_transcript(before_seq: int | None = None, limit: int = 100) -> dict:
+        require_active_session()
+        provider = getattr(web_session, "transcript_page", None)
+        if not callable(provider):
+            raise HTTPException(status_code=404, detail="session transcript is not available")
+        try:
+            return provider(before_seq=before_seq, limit=limit)
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get("/api/projects")
     def list_projects() -> dict:
         provider = getattr(web_session, "projects_snapshot", None)
@@ -117,6 +146,35 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/system/folder-picker")
+    def select_project_folder() -> dict[str, str | bool | None]:
+        try:
+            selected = pick_folder()
+        except (OSError, RuntimeError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {"selected": selected is not None, "workspace": selected}
+
+    @app.patch("/api/projects/{project_id}")
+    def rename_project(project_id: str, body: ProjectRenameRequest) -> dict:
+        try:
+            return asdict(web_session.rename_project(project_id, body.name))
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="project not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/api/projects/{project_id}")
+    def delete_project(project_id: str) -> dict:
+        try:
+            web_session.delete_project(project_id)
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="project not found") from exc
+        return {"status": "removed", **web_session.projects_snapshot()}
 
     @app.post("/api/projects/{project_id}/sessions", status_code=status.HTTP_201_CREATED)
     def create_session(project_id: str, body: SessionRequest) -> dict:
@@ -135,6 +193,27 @@ def create_app(web_session: WebSession, *, access_token: str) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
+
+    @app.patch("/api/projects/{project_id}/sessions/{session_id}")
+    def rename_session(project_id: str, session_id: str, body: SessionRenameRequest) -> dict:
+        try:
+            return asdict(web_session.rename_session(project_id, session_id, body.title))
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/api/projects/{project_id}/sessions/{session_id}")
+    def delete_session(project_id: str, session_id: str) -> dict:
+        try:
+            replacement = web_session.delete_session(project_id, session_id)
+        except SessionBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        return {"status": "removed", "active_session_id": replacement.id if replacement else None}
 
     @app.get("/api/memories")
     def list_memories(scope: Literal["global", "project"], project_id: str | None = None) -> list[dict]:

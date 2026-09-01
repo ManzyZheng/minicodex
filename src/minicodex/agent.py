@@ -119,10 +119,12 @@ class AgentSession:
 
     def export_state(self) -> dict[str, Any]:
         return {
+            "schema_version": 2,
             "messages": [dict(message) for message in self.messages[self._persistent_message_offset :]],
             "prompt_count": self.prompt_count,
             "execution_mode": self.execution_mode.value,
             "last_memory_extracted_prompt_index": self.last_memory_extracted_prompt_index,
+            "context": self.context_snapshot(),
         }
 
     def restore_state(self, state: dict[str, Any]) -> None:
@@ -467,6 +469,10 @@ class AgentSession:
                     self._emit("model_message", {"content": reply.content, "turn": turns})
                 self.messages.append(self._assistant_message(reply))
                 if not reply.tool_calls:
+                    if self.plan_state is PlanState.PLANNING and (reply.content or "").strip():
+                        result = self.request_plan_approval("implicit-plan-exit", reply.content or "")
+                        if result.ok:
+                            return self._outcome(StopReason.COMPLETED, self.pending_plan_text or "", turns)
                     if (
                         self.tools.change_seq
                         and self._verification_status() == "NOT_RUN"

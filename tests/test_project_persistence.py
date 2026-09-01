@@ -33,6 +33,40 @@ def test_project_registry_rejects_missing_workspace(tmp_path: Path) -> None:
         registry.register(tmp_path / "missing")
 
 
+def test_project_registry_renames_and_removes_only_owned_data(tmp_path: Path) -> None:
+    paths = ApplicationPaths(tmp_path / "data")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "keep.py"
+    source.write_text("print('keep')", encoding="utf-8")
+    registry = ProjectRegistry(paths)
+    project = registry.register(workspace, name="Original")
+    owned = paths.project_root(project.id) / "session-artifact.txt"
+    owned.write_text("owned", encoding="utf-8")
+
+    renamed = registry.rename(project.id, "  Renamed Project  ")
+
+    assert renamed.name == "Renamed Project"
+    assert registry.get(project.id).name == "Renamed Project"
+    assert registry.remove(project.id, purge_data=True) is True
+    assert not paths.project_root(project.id).exists()
+    assert source.read_text(encoding="utf-8") == "print('keep')"
+
+
+def test_project_and_session_rename_reject_blank_names(tmp_path: Path) -> None:
+    paths = ApplicationPaths(tmp_path / "data")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    project = ProjectRegistry(paths).register(workspace)
+    sessions = SessionRepository(paths)
+    session = sessions.create(project.id)
+
+    with pytest.raises(ValueError, match="name"):
+        ProjectRegistry(paths).rename(project.id, "   ")
+    with pytest.raises(ValueError, match="title"):
+        sessions.rename(project.id, session.id, "   ")
+
+
 def test_session_repository_creates_lists_and_round_trips_state(tmp_path: Path) -> None:
     paths = ApplicationPaths(tmp_path / "data")
     workspace = tmp_path / "workspace"
@@ -71,3 +105,22 @@ def test_session_repository_rejects_cross_project_session_lookup(tmp_path: Path)
     assert sessions.get(project_b.id, session.id) is None
     with pytest.raises(KeyError):
         sessions.save_state(project_b.id, session.id, {"messages": []})
+
+
+def test_session_repository_renames_and_deletes_exact_session(tmp_path: Path) -> None:
+    paths = ApplicationPaths(tmp_path / "data")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    project = ProjectRegistry(paths).register(workspace)
+    sessions = SessionRepository(paths)
+    first = sessions.create(project.id, title="First")
+    second = sessions.create(project.id, title="Second")
+
+    renamed = sessions.rename(project.id, first.id, "  Renamed Session  ")
+
+    assert renamed.title == "Renamed Session"
+    assert sessions.delete(project.id, first.id) is True
+    assert sessions.get(project.id, first.id) is None
+    assert sessions.get(project.id, second.id) is not None
+    assert not paths.session_root(project.id, first.id).exists()
+    assert workspace.is_dir()

@@ -33,6 +33,18 @@ IGNORED_DISCOVERY_DIRECTORIES = frozenset({
     "node_modules",
 })
 
+WINDOWS_POWERSHELL_COMMANDS = frozenset({
+    "copy-item",
+    "get-childitem",
+    "get-content",
+    "move-item",
+    "remove-item",
+    "rename-item",
+    "set-content",
+    "test-path",
+    "write-output",
+})
+
 
 @dataclass
 class FileChange:
@@ -83,7 +95,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
-    {"type": "function", "function": {"name": "run_shell", "description": "Run one or more commands sequentially. Each item must contain exactly one of argv or command. Prefer structured argv for ordinary programs; use command only for pipelines, redirection, or other shell syntax. Each step is permission-checked independently.", "parameters": {"type": "object", "properties": {"commands": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object", "properties": {"command": {"type": "string", "minLength": 1}, "argv": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string"}}, "purpose": {"type": "string", "enum": ["test", "build", "lint", "other"]}, "timeout_sec": {"type": "integer", "minimum": 1, "default": 30}, "expected_exit_codes": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 8, "default": [0]}}, "required": ["purpose"]}}, "stop_on_failure": {"type": "boolean", "default": True}}, "required": ["commands"]}}},
+    {"type": "function", "function": {"name": "run_shell", "description": "Run one or more commands sequentially. Each item must contain exactly one of argv or command. Prefer structured argv for real executables. PowerShell cmdlets such as Remove-Item and Get-Content, pipelines, redirection, and other shell syntax must use command. Each step is permission-checked independently.", "parameters": {"type": "object", "properties": {"commands": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "object", "properties": {"command": {"type": "string", "minLength": 1}, "argv": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string"}}, "purpose": {"type": "string", "enum": ["test", "build", "lint", "other"]}, "timeout_sec": {"type": "integer", "minimum": 1, "default": 30}, "expected_exit_codes": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 8, "default": [0]}}, "required": ["purpose"]}}, "stop_on_failure": {"type": "boolean", "default": True}}, "required": ["commands"]}}},
 ]
 
 
@@ -480,6 +492,18 @@ class ToolRuntime:
                 return self._failure("run_shell", call_id, "INVALID_ARGUMENT", f"commands[{index}] must contain exactly one of command or argv")
             if has_argv and len(argv) > 64:
                 return self._failure("run_shell", call_id, "INVALID_ARGUMENT", f"commands[{index}].argv may contain at most 64 entries")
+            if has_argv and os.name == "nt" and argv[0].casefold() in WINDOWS_POWERSHELL_COMMANDS:
+                return ToolResult.failure(
+                    tool="run_shell",
+                    call_id=call_id,
+                    code="SHELL_REQUIRED",
+                    message=(
+                        f"{argv[0]} is a PowerShell command and cannot be launched through argv; "
+                        "use the command field instead"
+                    ),
+                    retryable=True,
+                    data={"command_name": argv[0], "recommended_field": "command", "command_index": index},
+                )
             if purpose not in {"test", "build", "lint", "other"}:
                 return self._failure("run_shell", call_id, "INVALID_ARGUMENT", f"commands[{index}].purpose is invalid")
             if not isinstance(requested_timeout_sec, int) or requested_timeout_sec < 1:
@@ -619,6 +643,16 @@ class ToolRuntime:
             except subprocess.TimeoutExpired as exc:
                 step = {**common, "status": "timeout", "exit_code": None, "stdout": exc.stdout or "", "stderr": exc.stderr or ""}
                 failed_index, failure_code, failure_message = index, "COMMAND_TIMEOUT", f"command {index + 1} timed out after {timeout_sec}s"
+            except FileNotFoundError as exc:
+                step = {
+                    **common,
+                    "status": "spawn_failed",
+                    "exit_code": None,
+                    "executable": str(shell_argv[0]),
+                    "stdout": "",
+                    "stderr": str(exc),
+                }
+                failed_index, failure_code, failure_message = index, "COMMAND_SPAWN_FAILED", str(exc)
             except OSError as exc:
                 step = {**common, "status": "error", "exit_code": None, "stdout": "", "stderr": str(exc)}
                 failed_index, failure_code, failure_message = index, "COMMAND_ERROR", str(exc)
@@ -636,7 +670,14 @@ class ToolRuntime:
 
         data = {"commands": results, "stop_on_failure": stop_on_failure, "failed_index": failed_index}
         if failure_code:
-            return ToolResult.failure(tool="run_shell", call_id=call_id, code=failure_code, message=failure_message or failure_code, data=data)
+            return ToolResult.failure(
+                tool="run_shell",
+                call_id=call_id,
+                code=failure_code,
+                message=failure_message or failure_code,
+                retryable=failure_code == "COMMAND_SPAWN_FAILED",
+                data=data,
+            )
         return ToolResult.success(tool="run_shell", call_id=call_id, summary=f"completed {len(results)} shell command(s)", data=data)
 
     def execute(self, name: str, call_id: str, arguments: dict[str, Any]) -> ToolResult:
